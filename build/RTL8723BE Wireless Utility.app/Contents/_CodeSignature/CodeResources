@@ -10,23 +10,27 @@
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/Info.plist</key>
 		<data>
-		tVBqK4t+QxCBHfzdjtrmLWg52mk=
+		ah/G+IEUIPJ3iQqz9+rT2rS5kJk=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<data>
-		w3uP1AB1dsi30NJT5d/vp9mnCms=
+		QOS6MNNvoco/8sVBCviff6IXq44=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
 		<data>
 		YwoIhzByBpYWzcwx9V5tdCMIbXg=
 		</data>
+		<key>Resources/Testing Guide.txt</key>
+		<data>
+		Ff/saBC48HR+FkzRrANeg6QzaGI=
+		</data>
+		<key>Resources/load_test_kext.sh</key>
+		<data>
+		jRCnES6f74TXyWLv6SPmNlISd3U=
+		</data>
 		<key>Resources/rtl8723be_cli</key>
 		<data>
-		jl9qHr++Xczmyl7SzU5xK0VCcGI=
-		</data>
-		<key>Resources/stage_opencore.sh</key>
-		<data>
-		I2ZU7nHVtljEWDFiJC5COkcropc=
+		VS4whzmqXMCj9yVYWJ6VjRIDWd4=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -42,14 +46,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			V9C3wLnKNXqLdl7o5QDSpHWrpxnek7199R0wYEdA3TY=
+			kdkxQdx4ymtmO/7whN4rCmZaXjfnB9Jwz5ANb7f3JTI=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			TTKJJUNSIOBC1rkwRgUeIWAo+nbPogaLLTwk4y4vWTk=
+			NPkwAW3aLbmr0r13drICq/9bis2b3f4OzuYWGp1Yack=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
@@ -59,18 +63,25 @@
 			ZobeEKKKL+EbNsu4bcusyCfPxOoRa02r8YReWu5inps=
 			</data>
 		</dict>
+		<key>Resources/Testing Guide.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			shO7GL9ihAbu8JPmWbT3pYp6Tkzc645BlLtsGPAARNs=
+			</data>
+		</dict>
+		<key>Resources/load_test_kext.sh</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ZiSUHOBBooE3U+JZ0cnJd+zsfznHMk/6XOeaE8ETP6I=
+			</data>
+		</dict>
 		<key>Resources/rtl8723be_cli</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			joFDAob3koWKwUembawuXWaCIWpMl2t7/9hvohnWyIM=
-			</data>
-		</dict>
-		<key>Resources/stage_opencore.sh</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			QUBoDwpY9rNx+0Fke/Yy4VbSZJjCf4vMeh+uu9hxkho=
+			aR9kGMBWtHqNAlv0EoqbbE6C8eGJbqr2fCbnl5JYaGc=
 			</data>
 		</dict>
 	</dict>

@@ -5,3 +5,5 @@ build/test_crypto_bounds
 # Machine-specific EFI backups (contain identifiers; never publish)
 .local-backups/
 __pycache__/
+build/AppIcon.iconset/
+build/dmg_staging/

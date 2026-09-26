@@ -8,7 +8,7 @@ Complete native macOS Kernel Extension (`RTL8723BEWiFi.kext`), embedded 8051 MCU
 > `rtl8723be_experimental=1` is present. This is a development override, not a
 > recommendation to test on your daily machine. See [crash review](docs/CRASH_REVIEW.md).
 > `stage_opencore.sh` now stages locally only, with the OpenCore entry disabled.
-> The installation instructions below describe the historical release.
+> Current test instructions are below; earlier published releases remain unsafe.
 
 ---
 
@@ -28,21 +28,23 @@ Complete native macOS Kernel Extension (`RTL8723BEWiFi.kext`), embedded 8051 MCU
   - macOS Menu Bar Wi-Fi status icon + Main Dashboard Window.
   - One-click **2.4 GHz Network Scanner** and **WPA2-PSK Password Prompt**.
   - Live hardware telemetry (MAC address, BSSID, channel, RSSI dBm, TX/RX packet counters) and **Antenna #1 (Main) / Antenna #2 (Aux - HP)** toggle.
-  - Built-in **One-Click OpenCore EFI Installer** (`EFI/OC/Kexts` + `config.plist`) and **One-Click Administrator Kext Loader** (`kmutil load`).
+  - Built-in testing guide and guarded manual loader; no automatic EFI installation.
 - **57-Test Hardware Emulation & Protocol Verification Suite (`tests/test_runner`)**:
   - 100% pass rate (`57/57` tests) across virtual PCIe MMIO/eFuse, 8051 MCU firmware loader, TX/RX DMA descriptor rings, 802.11 beacon parser, WPA2 4-way handshake, and AES-CCMP crypto.
 
 ---
 
-## Quick Installation (DMG GUI Installer)
+## Testing the current development build (1.0.1)
 
-1. Download or open **`dist/RTL8723BE_WiFi_Installer.dmg`**.
-2. Drag **`RTL8723BE Wireless Utility.app`** to the **`Applications`** folder.
-3. Launch **`RTL8723BE Wireless Utility.app`** from `/Applications` (or the macOS Menu Bar Wi-Fi icon):
-   - Click **"Install Kext to OpenCore EFI"** to automatically copy `RTL8723BEWiFi.kext` into `EFI/OC/Kexts/` and register it in `EFI/OC/config.plist`, **or**
-   - Click **"Load Kext Now (kmutil load)"** to stage and load the kext immediately with administrator privileges.
-4. On HP laptops (`103c:804c`), keep the top-right antenna toggle on **`Ant #2 (Aux - HP)`**.
-5. Click **"Scan Now"** to sweep 2.4 GHz channels 1–13 and click **"Connect"** next to your Wi-Fi network.
+Open `build/RTL8723BE Wireless Utility.app`, or the rebuilt DMG in `dist/`.
+The app's **Testing Guide** explains normal internal-disk boot verification,
+preparing a manual test boot, logging, loading after login, and rollback.
+Its **Load Test Driver (after login)** button uses the guarded manual loader.
+The app no longer mounts or installs into EFI.
+
+Follow [the testing instructions](docs/TESTING.md). Keep the OpenCore RTL8723BE
+entry disabled. Do not use the old published v1.0.0 installer or the old
+`stage_opencore.sh --load` command.
 
 ---
 

@@ -55,7 +55,7 @@ cli: tools/rtl8723be_cli.cpp src/RTL8723BE_ipc.h
 	$(CXX) -arch x86_64 -std=c++17 -O2 -framework IOKit -framework CoreFoundation \
 		tools/rtl8723be_cli.cpp -o $(CLI_BIN)
 
-test: test-hardware test-crypto
+test: test-hardware test-crypto test-boot-config
 	$(MAKE) -C tests test
 
 diagnose: kext
@@ -75,3 +75,7 @@ test-crypto:
 	@mkdir -p build
 	$(CXX) -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc tests/test_crypto_bounds.cpp src/RTL8723BE_crypto.cpp -o build/test_crypto_bounds
 	./build/test_crypto_bounds
+
+.PHONY: test-boot-config
+test-boot-config:
+	python3 tests/test_boot_config.py

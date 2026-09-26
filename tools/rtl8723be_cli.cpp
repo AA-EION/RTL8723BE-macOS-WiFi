@@ -27,7 +27,7 @@ static io_connect_t openDriverConnection(void) {
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, matchDict);
     if (service == IO_OBJECT_NULL) {
         fprintf(stderr, "[!] RTL8723BE kernel service not currently loaded in IORegistry (pci10ec,b723).\n");
-        fprintf(stderr, "    Run `sudo ./scripts/stage_opencore.sh --load` or reboot with OpenCore EFI staged.\n");
+        fprintf(stderr, "    See docs/TESTING.md for manual post-login loading; EFI injection should stay disabled.\n");
         return IO_OBJECT_NULL;
     }
 

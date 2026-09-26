@@ -88,7 +88,7 @@ final class WiFiDriverModel: ObservableObject {
             DispatchQueue.main.async {
                 self.isDriverLoaded = false
                 self.statusText = self.pciDeviceDetected
-                    ? "Hardware Detected (pci10ec,b723) — Kext Ready to Load"
+                    ? "Hardware Detected (pci10ec,b723) — Driver Inactive — See Testing Guide"
                     : "Driver Not Loaded"
             }
             return
@@ -182,7 +182,7 @@ final class WiFiDriverModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 self.isScanning = false
-                self.appendLog("Driver not yet loaded in kernel — click 'Load Kext Now' or 'Stage to OpenCore EFI' below.")
+                self.appendLog("Driver not yet loaded in kernel — open Testing Guide before manual driver testing.")
             }
         }
     }
@@ -257,53 +257,40 @@ final class WiFiDriverModel: ObservableObject {
     }
 
     func loadKextWithAdminPrompt() {
+        guard let resources = Bundle.main.resourcePath else { return }
+        let helper = (resources as NSString).appendingPathComponent("load_test_kext.sh")
         let kextPath = bundledKextPath()
-        appendLog("Requesting administrator privileges to stage and load \(kextPath)...")
-        let cmd = "rm -rf /tmp/RTL8723BEWiFi.kext && cp -R '\(kextPath)' /tmp/RTL8723BEWiFi.kext && chown -R root:wheel /tmp/RTL8723BEWiFi.kext && chmod -R 755 /tmp/RTL8723BEWiFi.kext && kmutil load -p /tmp/RTL8723BEWiFi.kext"
-        let scriptSrc = "do shell script \"\(cmd)\" with administrator privileges"
-        DispatchQueue.global(qos: .userInitiated).async {
-            var errorDict: NSDictionary?
-            if let script = NSAppleScript(source: scriptSrc) {
-                let res = script.executeAndReturnError(&errorDict)
-                if let err = errorDict {
-                    self.appendLog("Kernel load message: \(err[NSAppleScript.errorMessage] ?? "Requires OpenCore reboot or SIP kext consent")")
-                } else {
-                    self.appendLog("kmutil load succeeded! \(res.stringValue ?? "")")
-                }
-                self.refreshStatus()
-            }
+        appendLog("Manual hardware test requested. EFI will not be modified. Save work before continuing.")
+        // Quote shell arguments and then the AppleScript string separately.
+        func shellQuote(_ value: String) -> String {
+            return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
         }
-    }
-
-    func installToOpenCoreEFI() {
-        let kextPath = bundledKextPath()
-        appendLog("Mounting EFI partition and installing RTL8723BEWiFi.kext to OpenCore EFI/OC/Kexts...")
-        let cmd = """
-        mkdir -p /Volumes/EFI_Mount && \
-        (diskutil mount -mountPoint /Volumes/EFI_Mount disk0s1 || diskutil mount disk0s1 || true) && \
-        for V in /Volumes/EFI_Mount /Volumes/EFI /Volumes/ESP; do \
-          if [ -d "$V/EFI/OC/Kexts" ]; then \
-            rm -rf "$V/EFI/OC/Kexts/RTL8723BEWiFi.kext" && \
-            cp -R '\(kextPath)' "$V/EFI/OC/Kexts/RTL8723BEWiFi.kext" && \
-            /usr/bin/python3 -c 'import plistlib,sys; p=sys.argv[1]; pl=plistlib.load(open(p,"rb")); k=pl.setdefault("Kernel",{}).setdefault("Add",[]); (k.append({"Arch":"x86_64","BundlePath":"RTL8723BEWiFi.kext","Comment":"Realtek RTL8723BE PCIe Wireless LAN Driver","Enabled":True,"ExecutablePath":"Contents/MacOS/RTL8723BEWiFi","MaxKernel":"","MinKernel":"20.0.0","PlistPath":"Contents/Info.plist"}) if not any(x.get("BundlePath")=="RTL8723BEWiFi.kext" for x in k) else None); plistlib.dump(pl,open(p,"wb"))' "$V/EFI/OC/config.plist" && \
-            echo "Installed to $V/EFI/OC/Kexts/RTL8723BEWiFi.kext"; \
-          fi; \
-        done
-        """
-        let escaped = cmd.replacingOccurrences(of: "\"", with: "\\\"")
+        let cmd = "/bin/bash " + shellQuote(helper) + " " + shellQuote(kextPath)
+        let escaped = cmd.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
         let scriptSrc = "do shell script \"\(escaped)\" with administrator privileges"
         DispatchQueue.global(qos: .userInitiated).async {
             var errorDict: NSDictionary?
             if let script = NSAppleScript(source: scriptSrc) {
                 let res = script.executeAndReturnError(&errorDict)
                 if let err = errorDict {
-                    self.appendLog("OpenCore install note: \(err[NSAppleScript.errorMessage] ?? "")")
+                    self.appendLog("Test load: \(err[NSAppleScript.errorMessage] ?? "See Testing Guide")")
                 } else {
-                    self.appendLog("OpenCore EFI updated! \(res.stringValue ?? "Reboot to activate kext in OpenCore.")")
+                    self.appendLog(res.stringValue ?? "Load request returned; checking driver status.")
                 }
+                self.refreshStatus()
             }
         }
     }
+
+    func showTestGuide() {
+        guard let path = Bundle.main.path(forResource: "Testing Guide", ofType: "txt") else {
+            appendLog("Testing Guide is missing; rebuild the app from current source.")
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
 }
 
 struct MainDashboardView: View {
@@ -442,14 +429,14 @@ struct MainDashboardView: View {
 
                 // Right: One-Click Driver & OpenCore Manager + Live Logs
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Driver & OpenCore Installer")
+                    Text("Experimental Driver Testing · 1.0.1")
                         .font(.system(size: 13, weight: .semibold))
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Button(action: { model.installToOpenCoreEFI() }) {
+                        Button(action: { model.showTestGuide() }) {
                             HStack {
                                 Image(systemName: "externaldrive.fill.badge.checkmark")
-                                Text("Install Kext to OpenCore EFI")
+                                Text("Testing Guide")
                                 Spacer()
                             }
                             .frame(maxWidth: .infinity)
@@ -459,7 +446,7 @@ struct MainDashboardView: View {
                         Button(action: { model.loadKextWithAdminPrompt() }) {
                             HStack {
                                 Image(systemName: "bolt.shield.fill")
-                                Text("Load Kext Now (kmutil load)")
+                                Text("Load Test Driver (after login)")
                                 Spacer()
                             }
                             .frame(maxWidth: .infinity)
@@ -582,8 +569,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Open RTL8723BE Wireless Utility", action: #selector(showMainWindow), keyEquivalent: "o"))
         menu.addItem(NSMenuItem(title: "Scan 2.4 GHz Networks", action: #selector(triggerMenuScan), keyEquivalent: "s"))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Install Kext to OpenCore EFI...", action: #selector(triggerOpenCoreInstall), keyEquivalent: "i"))
-        menu.addItem(NSMenuItem(title: "Load Kext Now (Administrator)...", action: #selector(triggerLoadKext), keyEquivalent: "l"))
+        menu.addItem(NSMenuItem(title: "Testing Guide...", action: #selector(triggerOpenCoreInstall), keyEquivalent: "i"))
+        menu.addItem(NSMenuItem(title: "Load Test Driver (after login)...", action: #selector(triggerLoadKext), keyEquivalent: "l"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit RTL8723BE Utility", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -602,7 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func triggerOpenCoreInstall() {
-        model.installToOpenCoreEFI()
+        model.showTestGuide()
     }
 
     @objc func triggerLoadKext() {

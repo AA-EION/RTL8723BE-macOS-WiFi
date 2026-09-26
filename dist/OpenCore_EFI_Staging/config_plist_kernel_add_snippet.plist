@@ -7,7 +7,7 @@
 	<key>Comment</key>
 	<string>Realtek RTL8723BE PCIe Wireless LAN Driver (pci10ec,b723)</string>
 	<key>Enabled</key>
-	<true/>
+	<false/>
 	<key>ExecutablePath</key>
 	<string>Contents/MacOS/RTL8723BEWiFi</string>
 	<key>MaxKernel</key>
