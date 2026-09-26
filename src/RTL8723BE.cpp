@@ -826,7 +826,7 @@ bool RTL8723BE::initDMARings() {
         fRxBufMem[i]->prepare(kIODirectionInOut);
 
         fRxRingDescVirt[i].dw0 = 0;
-        fRxRingDescVirt[i].set_pktsize(RTL8723BE_RX_BUF_SIZE);
+        fRxRingDescVirt[i].set_length(RTL8723BE_RX_BUF_SIZE);
         fRxRingDescVirt[i].set_buffer_addr((uint32_t)(fRxBufMem[i]->getPhysicalAddress() & 0xFFFFFFFFULL));
         if (i == (RTL8723BE_RX_DESC_COUNT - 1)) {
             fRxRingDescVirt[i].set_eor(true); // End of Ring flag
@@ -985,7 +985,7 @@ void RTL8723BE::handleRxInterrupt() {
         // Re-arm descriptor for DMA, explicitly restoring EOR on final slot and pktsize!
         bool is_last = (fRxHostIdx == (RTL8723BE_RX_DESC_COUNT - 1));
         desc->dw0 = 0;
-        desc->set_pktsize(RTL8723BE_RX_BUF_SIZE);
+        desc->set_length(RTL8723BE_RX_BUF_SIZE);
         if (is_last) {
             desc->set_eor(true);
         }
