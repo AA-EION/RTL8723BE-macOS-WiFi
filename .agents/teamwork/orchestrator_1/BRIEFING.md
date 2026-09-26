@@ -61,7 +61,7 @@ Orchestrate the complete, production-grade Realtek RTL8723BE macOS Wi-Fi driver,
 | test_writer_m2 | teamwork_preview_test_writer | M2 E2E Mock Test Suite & Harness | completed | 640a2f65-59e4-4a10-835d-a5237b414fda |
 | reviewer_m1_1 | teamwork_preview_reviewer | M1 Architecture Review 1 | completed | f54bc9af-7866-4e3c-8edb-a4f09b239db2 |
 | reviewer_m1_2 | teamwork_preview_reviewer | M1 Architecture Review 2 | completed | 8018ff77-cbc5-4bd9-b138-75fd7915a56d |
-| challenger_m1_1 | teamwork_preview_challenger | M1 Hardware Challenger | in-progress | dbfe2ba0-d567-4b85-9439-dacc062581ad |
+| challenger_m1_1 | teamwork_preview_challenger | M1 Hardware Challenger | completed | dbfe2ba0-d567-4b85-9439-dacc062581ad |
 | challenger_m1_2 | teamwork_preview_challenger | M1 Protocol Challenger | completed | e3dfdb5c-9564-4531-8c7a-9bb57ad53eb8 |
 | auditor_m1_1 | teamwork_preview_auditor | M1 Forensic Auditor | completed | 63e43350-9f4a-4cf0-92fd-bb611efcadd9 |
 | worker_implementation | teamwork_preview_worker | Full Driver Implementation Worker | in-progress | 9a1629ed-e0ac-4d81-87a9-29bdb1aad68a |

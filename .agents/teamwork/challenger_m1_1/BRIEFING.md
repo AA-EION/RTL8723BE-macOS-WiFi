@@ -1,4 +1,4 @@
-# BRIEFING — 2026-09-26T16:41:30Z
+# BRIEFING — 2026-09-26T17:02:00Z
 
 ## Mission
 Adversarially challenge `docs/DESIGN.md` on hardware edge cases, 64-bit DMA memory safety, 8051 MCU download handshake timing, eFuse corruption/unburned OTP recovery, and HP single-antenna selection.
@@ -26,17 +26,33 @@ Adversarially challenge `docs/DESIGN.md` on hardware edge cases, 64-bit DMA memo
 - **Review criteria**: DMA 64-bit addressing & boundary safety, 8051 MCU timing/hang recovery, eFuse parsing resilience, antenna diversity logic
 
 ## Attack Surface
-- **Hypotheses tested**: Initial analysis underway
-- **Vulnerabilities found**: Pending investigation
-- **Untested angles**: DMA cache coherency, 64-bit high address masking, ring wrap bit semantics, MCU download loop timeouts, eFuse boundary out-of-bounds reads, antenna diversity hardcoding vs auto-detection
+- **Hypotheses tested**:
+  - TX descriptor size & field offsets (48B vs 64B, DW8/10 vs DW10/12)
+  - 64-bit DMA activation via PCI config 0x719 bit 5
+  - 8051 MCU page download streaming loop & timeout watchdog limits
+  - eFuse blank/corrupted OTP behavior and RF PA overdrive risk
+  - HP single-antenna hardcoding vs model variation
+- **Vulnerabilities found**:
+  - CRITICAL: TX descriptor stride misalignment (48B in doc vs 64B in HW) & field misplacement causing packet 2 crash
+  - CRITICAL: Missing PCI config 0x719 bit 5 causing silent truncation of >4GB 64-bit addresses
+  - HIGH: 30s MCU polling loop blocking boot thread and triggering XNU watchdog panic
+  - HIGH: Unaligned firmware stream buffer over-read
+  - HIGH: Unchecked 0xFF power calibration risking burning on-chip RF power amplifier
+  - MEDIUM: HP antenna hardcoding causing -35dB signal drop on Port 1 batches
+- **Untested angles**:
+  - High-throughput A-MPDU aggregation timing under PCIe ASPM L1 states
 
 ## Loaded Skills
 None specified.
 
 ## Key Decisions Made
-- Initializing adversarial review of EDD-RTL8723BE-DARWIN-01.
+- Executed empirical test harness `tests/empirical_challenge_m1_1.cpp` proving all four failure modes.
+- Authored adversarial challenge report in `challenge.md`.
+- Submitted formal handoff report in `handoff.md` with explicit verdict: REQUEST_CHANGES.
 
 ## Artifact Index
 - docs/DESIGN.md — Target document
-- .agents/teamwork/challenger_m1_1/challenge.md — Challenge report
-- .agents/teamwork/challenger_m1_1/handoff.md — Handoff report with verdict
+- tests/empirical_challenge_m1_1.cpp — Executable C++ verification test harness
+- .agents/teamwork/challenger_m1_1/challenge.md — Detailed adversarial challenge report
+- .agents/teamwork/challenger_m1_1/handoff.md — 5-component handoff report (REQUEST_CHANGES)
+- .agents/teamwork/challenger_m1_1/progress.md — Liveness heartbeat and progress log

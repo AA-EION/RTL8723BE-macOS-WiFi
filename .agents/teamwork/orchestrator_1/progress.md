@@ -27,7 +27,7 @@ Current iteration: 1 / 32
 | test_writer_m2 | M2 Test Suite Writer | completed | 640a2f65-59e4-4a10-835d-a5237b414fda | 2026-09-26T16:36:17Z | 2026-09-26T16:59:40Z |
 | reviewer_m1_1 | M1 Architecture Reviewer 1 | completed | f54bc9af-7866-4e3c-8edb-a4f09b239db2 | 2026-09-26T16:40:12Z | 2026-09-26T16:44:37Z |
 | reviewer_m1_2 | M1 Architecture Reviewer 2 | completed | 8018ff77-cbc5-4bd9-b138-75fd7915a56d | 2026-09-26T16:40:12Z | 2026-09-26T16:45:40Z |
-| challenger_m1_1 | M1 Hardware Challenger | in-progress | dbfe2ba0-d567-4b85-9439-dacc062581ad | 2026-09-26T16:40:12Z | - |
+| challenger_m1_1 | M1 Hardware Challenger | completed | dbfe2ba0-d567-4b85-9439-dacc062581ad | 2026-09-26T16:40:12Z | 2026-09-26T17:02:49Z |
 | challenger_m1_2 | M1 Protocol Challenger | completed | e3dfdb5c-9564-4531-8c7a-9bb57ad53eb8 | 2026-09-26T16:40:12Z | 2026-09-26T16:46:47Z |
 | auditor_m1_1 | M1 Forensic Auditor | completed | 63e43350-9f4a-4cf0-92fd-bb611efcadd9 | 2026-09-26T16:40:12Z | 2026-09-26T16:48:10Z |
 | worker_implementation | Full Driver Implementation Worker | in-progress | 9a1629ed-e0ac-4d81-87a9-29bdb1aad68a | 2026-09-26T16:59:52Z | - |
