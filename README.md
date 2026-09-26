@@ -2,6 +2,14 @@
 
 Complete native macOS Kernel Extension (`RTL8723BEWiFi.kext`), embedded 8051 MCU firmware (`rtl8723befw.bin`), user-space CLI (`rtl8723be_cli`), and native macOS GUI application (`RTL8723BE Wireless Utility.app` inside `RTL8723BE_WiFi_Installer.dmg`) for the **Realtek RTL8723BE PCIe 802.11b/g/n Wireless LAN Adapter** (`vendor-id: 0x10ec`, `device-id: 0xb723`, HP subsystem `0x103c:0x804c`) on macOS (including **macOS 26.6.2 / Darwin 25.6.0**).
 
+> **Experimental — boot crash investigation in progress.** The existing v1.0.0
+> binaries/DMG are not hardware-validated and should not be installed in a working
+> or recovery EFI. New source builds refuse hardware startup unless the boot arg
+> `rtl8723be_experimental=1` is present. This is a development override, not a
+> recommendation to test on your daily machine. See [crash review](docs/CRASH_REVIEW.md).
+> `stage_opencore.sh` now stages locally only, with the OpenCore entry disabled.
+> The installation instructions below describe the historical release.
+
 ---
 
 ## Features

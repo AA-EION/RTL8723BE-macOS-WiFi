@@ -6,12 +6,15 @@ KEXT_SRC="${PROJECT_DIR}/build/RTL8723BEWiFi.kext"
 CLI_BIN="${PROJECT_DIR}/tools/rtl8723be_cli"
 STAGING_DIR="${PROJECT_DIR}/dist/OpenCore_EFI_Staging"
 
+if [[ $# -ne 0 ]]; then
+    echo "Usage: $0 (local staging only; live loading/EFI installation is disabled)" >&2
+    exit 2
+fi
+
 echo "=== Realtek RTL8723BE (pci10ec,b723) macOS 26.6.2 Verification & OpenCore Staging ==="
 
-if [[ ! -d "${KEXT_SRC}" ]]; then
-    echo "[*] Building RTL8723BEWiFi.kext and rtl8723be_cli..."
-    make -C "${PROJECT_DIR}" all
-fi
+echo "[*] Building RTL8723BEWiFi.kext and rtl8723be_cli..."
+make -C "${PROJECT_DIR}" all
 
 echo "[1/4] Verifying Mach-O architecture and code signature..."
 file "${KEXT_SRC}/Contents/MacOS/RTL8723BEWiFi"
@@ -27,7 +30,7 @@ fi
 echo "[+] KPI Dependencies verified: OK"
 
 echo "[3/4] Running 57-test hardware register / DMA / 802.11 / WPA2-CCMP verification suite..."
-"${PROJECT_DIR}/tests/test_runner" | tail -n 15
+make -C "${PROJECT_DIR}" test
 
 echo "[4/4] Staging OpenCore bundle in ${STAGING_DIR}..."
 mkdir -p "${STAGING_DIR}/EFI/OC/Kexts"
@@ -45,7 +48,7 @@ cat > "${STAGING_DIR}/config_plist_kernel_add_snippet.plist" <<'EOF'
 	<key>Comment</key>
 	<string>Realtek RTL8723BE PCIe Wireless LAN Driver (pci10ec,b723)</string>
 	<key>Enabled</key>
-	<true/>
+	<false/>
 	<key>ExecutablePath</key>
 	<string>Contents/MacOS/RTL8723BEWiFi</string>
 	<key>MaxKernel</key>
@@ -57,56 +60,9 @@ cat > "${STAGING_DIR}/config_plist_kernel_add_snippet.plist" <<'EOF'
 </dict>
 EOF
 
-# Auto-mount disk0s1 OpenCore EFI partition if running as root (sudo)
-if [[ "${EUID}" -eq 0 ]]; then
-    mkdir -p /Volumes/EFI
-    diskutil mount -mountPoint /Volumes/EFI disk0s1 >/dev/null 2>&1 || diskutil mount disk0s1 >/dev/null 2>&1 || true
-fi
-
-# If an OpenCore EFI partition is mounted under /Volumes/EFI or /Volumes/ESP, install/update automatically
-for VOL in "/Volumes/EFI" "/Volumes/ESP" "/Volumes/EFI_Mount"; do
-    if [[ -d "${VOL}/EFI/OC/Kexts" && -w "${VOL}/EFI/OC/Kexts" ]]; then
-        echo "[*] Detected mounted OpenCore EFI at ${VOL}/EFI/OC — updating RTL8723BEWiFi.kext..."
-        rm -rf "${VOL}/EFI/OC/Kexts/RTL8723BEWiFi.kext"
-        cp -R "${KEXT_SRC}" "${VOL}/EFI/OC/Kexts/RTL8723BEWiFi.kext"
-        python3 - "${VOL}/EFI/OC/config.plist" <<'PYEOF'
-import plistlib, sys, os
-cfg_path = sys.argv[1]
-if os.path.exists(cfg_path):
-    with open(cfg_path, 'rb') as f:
-        pl = plistlib.load(f)
-    kadd = pl.setdefault('Kernel', {}).setdefault('Add', [])
-    if not any(entry.get('BundlePath') == 'RTL8723BEWiFi.kext' for entry in kadd):
-        kadd.append({
-            'Arch': 'x86_64',
-            'BundlePath': 'RTL8723BEWiFi.kext',
-            'Comment': 'Realtek RTL8723BE PCIe Wireless LAN Driver (pci10ec,b723)',
-            'Enabled': True,
-            'ExecutablePath': 'Contents/MacOS/RTL8723BEWiFi',
-            'MaxKernel': '',
-            'MinKernel': '20.0.0',
-            'PlistPath': 'Contents/Info.plist',
-        })
-        with open(cfg_path, 'wb') as f:
-            plistlib.dump(pl, f)
-        print(f"[+] Injected RTL8723BEWiFi.kext into {cfg_path}")
-    else:
-        print(f"[+] Updated RTL8723BEWiFi.kext binary in {cfg_path}")
-PYEOF
-    fi
-done
-
-if [[ "${1:-}" == "--load" ]]; then
-    echo "[*] Unloading any previous com.rtl8723be.macos.wifi instance and replacing /tmp/RTL8723BEWiFi.kext..."
-    sudo kmutil unload -b com.rtl8723be.macos.wifi 2>/dev/null || true
-    sudo rm -rf /tmp/RTL8723BEWiFi.kext
-    sudo cp -R "${KEXT_SRC}" /tmp/RTL8723BEWiFi.kext
-    sudo chown -R root:wheel /tmp/RTL8723BEWiFi.kext
-    sudo chmod -R 755 /tmp/RTL8723BEWiFi.kext
-    sudo kmutil load -p /tmp/RTL8723BEWiFi.kext
-    echo "[+] Patched kernel extension loaded! Checking IORegistry..."
-    ioreg -l | grep -A 15 "RTL8723BE" || true
-fi
+# Staging is deliberately local-only. Never infer a boot volume from disk0s1
+# or overwrite an arbitrary mounted EFI (which may be the recovery EFI).
+echo "[!] Experimental build: no EFI partition was mounted or modified."
 
 echo ""
 echo "[+] OpenCore Staging Bundle ready at: ${STAGING_DIR}/EFI/OC/Kexts/RTL8723BEWiFi.kext"

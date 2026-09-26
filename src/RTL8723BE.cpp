@@ -1,5 +1,6 @@
 #include "RTL8723BE.hpp"
 #include <string.h>
+#include <pexpert/pexpert.h>
 
 #define super IOEthernetController
 OSDefineMetaClassAndStructors(RTL8723BE, IOEthernetController);
@@ -146,6 +147,13 @@ void RTL8723BE::cleanupResources() {
 }
 
 bool RTL8723BE::start(IOService *provider) {
+    // Keep experimental hardware access opt-in, including OpenCore injection.
+    int experimental = 0;
+    if (!PE_parse_boot_argn("rtl8723be_experimental", &experimental, sizeof(experimental)) ||
+        experimental != 1) {
+        IOLog("RTL8723BE: Hardware startup disabled; experimental driver under crash review\n");
+        return false;
+    }
     if (!super::start(provider)) {
         return false;
     }

@@ -1,0 +1,50 @@
+# Crash review — 2026-09-26
+
+Review baseline: `982d2de`. No matching panic report was found in the standard
+system/user DiagnosticReports directories. Shutdown-stall reports exist but are
+not proof of this driver's crash. Findings below are source-confirmed defects;
+identifying the exact observed crash requires a panic backtrace or last boot log.
+
+User reports running `sudo ./scripts/stage_opencore.sh --load`, approving the
+kext, rebooting successfully to login, then a complete freeze after entering the
+password. This timing is consistent with interface activation, but does not
+prove which driver path stalled.
+
+## Critical findings
+
+1. **TX DMA layout is wrong.** `TxDesc40` puts the data pointer at byte 32,
+   allocates only 40 bytes per entry, and has no circular next-descriptor pointer.
+   RTL8723BE uses a 40-byte control header, data pointer at byte 40 and next pointer
+   at byte 48. Linux allocates a larger PCI descriptor slot and explicitly links
+   every entry. Once TX is polled, the original driver lets hardware interpret the
+   following entry's control words as DMA addresses. This can cause DMA faults,
+   invalid memory access, or a device/bus hang.
+2. **DMA enabled before valid rings; never revoked before free.** Startup enables
+   PCI bus mastering and MAC/DMA before allocating/programming descriptors.
+   Cleanup releases DMA memory without clearing PCI bus mastering. Failed starts
+   and unloads can leave a device accessing invalid or released memory.
+3. **Failed initialization is ignored.** A failed MMIO probe, firmware download,
+   or LLT initialization does not abort startup. The embedded firmware has
+   signature `0x5301`, version 15; the old startup log claimed version 36.
+4. **Deployment makes the defect persistent.** The former staging script mounted
+   disk0s1 and replaced any matching mounted EFI automatically, then enabled the
+   kext at every boot. Even `--load` also modified EFI first. This explains how a
+   bad experimental build can require a separate boot EFI to recover.
+5. **Tests do not exercise the kernel driver.** `tests/mock/` implements a second
+   driver and second descriptor definitions. It wraps TX by arithmetic instead
+   of following PCI descriptor links, hiding the layout defect. Passing these
+   tests is not evidence of boot safety.
+
+## Containment
+
+Hardware startup now requires an explicit experimental boot argument, checked
+before the superclass starts or PCI registers are touched. Staging writes only
+inside the repository and emits a disabled OpenCore entry. No live kext load,
+unload, EFI mount/edit or reboot was performed during this review. Previously
+published binaries do not acquire these changes automatically.
+
+## Sources
+
+- [Linux v6.12 RTL8723BE descriptor accessors](https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/trx.h)
+- [Linux v6.12 PCI TX ring allocation/linking](https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtlwifi/pci.c)
+- [Linux v6.12 RTL8723BE register map](https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/reg.h)
