@@ -18,8 +18,8 @@
 #include "RTL8723BE_tables.hpp"
 #include "RTL8723BE_firmware.hpp"
 
-#define RTL8723BE_TX_DESC_COUNT  64
-#define RTL8723BE_RX_DESC_COUNT  64
+#define RTL8723BE_TX_DESC_COUNT  16
+#define RTL8723BE_RX_DESC_COUNT  32
 #define RTL8723BE_RX_BUF_SIZE    2048
 #define RTL8723BE_TX_BUF_SIZE    4096
 
@@ -77,6 +77,7 @@ private:
     bool setChannel(uint8_t channel, uint8_t bw = 0);
     bool initDMARings();
     void freeDMARings();
+    void cleanupResources();
 
     // DMA Ring Operations
     bool transmitRawFrame(RTLQueueId qId, const uint8_t *frame, size_t len);
@@ -109,6 +110,8 @@ private:
 
     // Hardware State
     RTLPowerState                  fPowerState;
+    volatile uint32_t              fHIMRMask;
+    volatile bool                  fInterruptEnabled;
     CalibData                      fCalib;
     uint8_t                        fCurrentChannel;
     uint8_t                        fActiveAntenna; // 1 = Main, 2 = Aux
