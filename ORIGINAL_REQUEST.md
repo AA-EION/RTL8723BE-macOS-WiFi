@@ -42,3 +42,19 @@ Provide a companion control tool/daemon (CLI utility and/or HeliPort-compatible 
 - [ ] Driver is safely staged in OpenCore EFI (`EFI/OC/Kexts` + `config.plist` or root load script) and loaded on the host once pre-load safety checks pass.
 - [ ] `ioreg -l` confirms the driver attaches to `pci10ec,b723` (`RP06@1c0005/PXSX@0`), reads the hardware MAC address from eFuse, boots `rtl8723befw.bin`, and registers an active `IONetworkInterface` (`enX`).
 - [ ] Running the Wi-Fi scan utility performs a real 2.4 GHz hardware scan on `pci10ec,b723` and outputs discovered access points, with full connection/DHCP bring-up support.
+
+## 2026-09-26T16:58:09Z
+
+URGENT USER DIRECTIVE — LOW TOKEN BUDGET (18 units left) & MANDATORY CHECKPOINTING:
+The user warns that their token usage quota is running very low (only 18 left) and explicitly requires continuous on-disk checkpoints so they can resume later at any point.
+
+IMMEDIATE ACTIONS FOR SENTINEL & ORCHESTRATOR:
+1. Forward this directive immediately to the Project Orchestrator (97aa8b74-6088-4e6c-8c61-400af4865bc2).
+2. Switch to ULTRA-LEAN / HIGH-EFFICIENCY execution mode:
+   - Avoid spawning redundant multi-round reviewer/challenger/auditor subagents that burn tokens.
+   - Directly prioritize writing and compiling the complete working deliverables on disk now:
+     a) `src/` & `build/RTL8723BEWiFi.kext` (with `Info.plist` matching `pci10ec,b723` / `0xB72310EC`, `rtl8723befw.bin`, PCIe MMIO/eFuse/MCU/DMA/802.11/WPA2 implementation)
+     b) `tools/rtl8723be_cli` user-space control utility
+     c) `scripts/stage_opencore.sh` & `kmutil` diagnostic verification
+3. Write and continuously update `/Users/eion/.gemini/antigravity/scratch/rtl8723be_macos_wifi/CHECKPOINT.md` and run `git add -A && git commit` after every step so that all progress, build commands, completed modules, and exact next steps to resume are safely persisted on disk.
+
