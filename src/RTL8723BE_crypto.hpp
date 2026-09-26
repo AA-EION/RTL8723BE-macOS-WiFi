@@ -49,12 +49,11 @@ public:
 
 private:
     uint32_t round_keys_[44];
-    uint32_t inv_round_keys_[44];
 };
 
 // RFC 3394 AES Key Wrap & Unwrap
 bool aes_key_wrap(const uint8_t kek[16], const uint8_t* plain, size_t plain_len, uint8_t* wrapped);
-bool aes_key_unwrap(const uint8_t kek[16], const uint8_t* wrapped, size_t wrapped_len, uint8_t* plain);
+bool aes_key_unwrap(const uint8_t kek[16], const uint8_t* wrapped, size_t wrapped_len, uint8_t* plain, size_t plain_capacity);
 
 // IEEE 802.11 CCMP (AES-128 CCM Mode, RFC 3610)
 // Nonce is 13 bytes: Priority (1 byte) || Addr2 (6 bytes) || PN (6 bytes)

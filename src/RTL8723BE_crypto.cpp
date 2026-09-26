@@ -306,7 +306,6 @@ inline uint8_t multiply(uint8_t x, uint8_t y) {
 
 AES128::AES128() {
     memset(round_keys_, 0, sizeof(round_keys_));
-    memset(inv_round_keys_, 0, sizeof(inv_round_keys_));
 }
 
 AES128::AES128(const uint8_t key[16]) {
@@ -333,26 +332,7 @@ void AES128::set_key(const uint8_t key[16]) {
         round_keys_[i] = round_keys_[i - 4] ^ temp;
     }
 
-    memcpy(inv_round_keys_, round_keys_, sizeof(round_keys_));
-    for (int r = 1; r < 10; ++r) {
-        for (int c = 0; c < 4; ++c) {
-            uint32_t w = inv_round_keys_[r * 4 + c];
-            uint8_t a0 = (uint8_t)((w >> 24) & 0xFF);
-            uint8_t a1 = (uint8_t)((w >> 16) & 0xFF);
-            uint8_t a2 = (uint8_t)((w >> 8) & 0xFF);
-            uint8_t a3 = (uint8_t)(w & 0xFF);
 
-            uint8_t u0 = multiply(a0, 0x0E) ^ multiply(a1, 0x0B) ^ multiply(a2, 0x0D) ^ multiply(a3, 0x09);
-            uint8_t u1 = multiply(a0, 0x09) ^ multiply(a1, 0x0E) ^ multiply(a2, 0x0B) ^ multiply(a3, 0x0D);
-            uint8_t u2 = multiply(a0, 0x0D) ^ multiply(a1, 0x09) ^ multiply(a2, 0x0E) ^ multiply(a3, 0x0B);
-            uint8_t u3 = multiply(a0, 0x0B) ^ multiply(a1, 0x0D) ^ multiply(a2, 0x09) ^ multiply(a3, 0x0E);
-
-            inv_round_keys_[r * 4 + c] = (((uint32_t)u0) << 24) |
-                                         (((uint32_t)u1) << 16) |
-                                         (((uint32_t)u2) << 8) |
-                                         ((uint32_t)u3);
-        }
-    }
 }
 
 void AES128::encrypt_block(const uint8_t in[16], uint8_t out[16]) const {
@@ -425,11 +405,9 @@ void AES128::decrypt_block(const uint8_t in[16], uint8_t out[16]) const {
 
         for (int r = 0; r < 4; ++r) {
             for (int c = 0; c < 4; ++c) {
-                if (round > 0) {
-                    state[r][c] ^= (uint8_t)((inv_round_keys_[round * 4 + c] >> (24 - 8 * r)) & 0xFF);
-                } else {
-                    state[r][c] ^= (uint8_t)((round_keys_[c] >> (24 - 8 * r)) & 0xFF);
-                }
+                // Standard inverse cipher: AddRoundKey precedes InvMixColumns,
+                // so use the original key, not an already mixed round key.
+                state[r][c] ^= (uint8_t)((round_keys_[round * 4 + c] >> (24 - 8 * r)) & 0xFF);
             }
         }
 
@@ -486,8 +464,9 @@ bool aes_key_wrap(const uint8_t kek[16], const uint8_t* plain, size_t plain_len,
     return true;
 }
 
-bool aes_key_unwrap(const uint8_t kek[16], const uint8_t* wrapped, size_t wrapped_len, uint8_t* plain) {
-    if ((wrapped_len % 8) != 0 || wrapped_len < 24) return false;
+bool aes_key_unwrap(const uint8_t kek[16], const uint8_t* wrapped, size_t wrapped_len, uint8_t* plain, size_t plain_capacity) {
+    if (!kek || !wrapped || !plain || (wrapped_len % 8) != 0 || wrapped_len < 24) return false;
+    if (wrapped_len - 8 > plain_capacity) return false;
     size_t n = (wrapped_len - 8) / 8;
     if (n > 16) return false;
 

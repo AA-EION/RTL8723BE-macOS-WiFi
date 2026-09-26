@@ -84,3 +84,37 @@ separate and still cannot establish hardware safety.
   is not ready for normal network use even if booting becomes stable.
 - Historical bundled apps/DMGs and EFI copies contain old binaries. Rebuilding
   source does not update the user's installed kext or the published release.
+
+## Additional production-code memory review
+
+The EAPOL GTK handler supplied a 64-byte stack buffer to `aes_key_unwrap`, which
+could copy up to 128 bytes without knowing the destination capacity. The API now
+requires capacity, and the handler passes `sizeof(unwrapped)`. A separate
+production test exercises a valid wrapped 128-byte payload against the 64-byte
+limit under ASan/UBSan.
+
+While adding the test, the **unmodified production AES decrypt failed the RFC
+3394 section 4.1 known-answer vector**, despite all 57 simulator tests passing.
+It mixed inverse-transformed round keys before InvMixColumns, effectively mixing
+them twice. Decrypt now uses the original round keys in the standard inverse
+cipher order. Both wrap and unwrap match the published vector. This is a
+separate protocol defect, not evidence that WPA2 caused the reported login
+freeze. The stack-overwrite finding is a source-level capacity defect; the old
+broken decrypt rejected the standard vector before reaching its output copy.
+
+## Verification results
+
+- Forced source rebuild of the kext; ad-hoc signature checked. SDK header
+  override warnings remain; no source compile errors.
+- Production descriptor/ring contract: passed with ASan/UBSan.
+- Production crypto known-answer and capacity tests: passed with ASan/UBSan.
+- Legacy simulator: 57/57 passed (limited coverage as described above).
+- Staging script: shell syntax valid; `--load` rejects with exit status 2 before
+  building, mounting EFI, requesting privilege, or attempting a kernel load.
+- `kmutil print-diagnostics` resolves dependencies (`Dependencies: OK`), but
+  rejects load authentication for this user-owned, ad-hoc-signed development
+  bundle (ownership and signature errors). This is not a successful load check;
+  no ownership changes or signing-policy changes were made.
+- No installation or live hardware validation performed.
+
+Crypto oracle: [RFC 3394 section 4.1](https://www.rfc-editor.org/rfc/rfc3394.html#section-4.1).

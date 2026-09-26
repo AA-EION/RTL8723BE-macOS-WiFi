@@ -1,3 +1,7 @@
+> **Superseded by the 2026-09-26 [crash review](docs/CRASH_REVIEW.md).**
+> The completion/hardware-safety claims below are historical and unverified.
+> Do not install the historical DMG or EFI bundles on a working boot volume.
+
 # RTL8723BE macOS Wi-Fi Driver — Final Project Checkpoint & User Guide
 
 > **Status**: **ALL MILESTONES COMPLETED, PACKAGED AS `.DMG`, & PUBLISHED TO GITHUB (`100%`)**

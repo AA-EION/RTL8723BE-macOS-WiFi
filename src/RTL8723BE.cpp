@@ -1544,7 +1544,7 @@ void RTL8723BE::handleEAPOLFrame(const uint8_t *frame, size_t len) {
             uint16_t kd_len = (uint16_t)((((uint16_t)verify_buf[97]) << 8) | verify_buf[98]);
             if (kd_len >= 32 && (99 + kd_len) <= eapol_len) {
                 uint8_t unwrapped[64];
-                if (rtl_crypto::aes_key_unwrap(fPTK + 16, verify_buf + 99, kd_len, unwrapped)) {
+                if (rtl_crypto::aes_key_unwrap(fPTK + 16, verify_buf + 99, kd_len, unwrapped, sizeof(unwrapped))) {
                     if (unwrapped[0] == 0xDD) { // KDE
                         memcpy(fGTK, unwrapped + 8, 16);
                     }

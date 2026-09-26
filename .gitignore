@@ -1,0 +1,4 @@
+# Local dependency files and userspace regression binaries
+build/*.d
+build/test_hardware_contract
+build/test_crypto_bounds

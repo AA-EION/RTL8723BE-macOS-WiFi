@@ -27,9 +27,9 @@ if ! echo "${DIAG_OUT}" | grep -q "Dependencies: OK"; then
     echo "[!] ERROR: KPI dependency verification failed! Refusing to stage kext."
     exit 1
 fi
-echo "[+] KPI Dependencies verified: OK"
+echo "[+] KPI dependencies resolved; this does not validate load authorization or hardware safety."
 
-echo "[3/4] Running 57-test hardware register / DMA / 802.11 / WPA2-CCMP verification suite..."
+echo "[3/4] Running production contract tests and legacy simulator..."
 make -C "${PROJECT_DIR}" test
 
 echo "[4/4] Staging OpenCore bundle in ${STAGING_DIR}..."
