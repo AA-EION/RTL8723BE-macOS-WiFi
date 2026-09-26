@@ -25,8 +25,8 @@ if [[ "${LOADED}" == *com.rtl8723be.macos.wifi* ]]; then
     exit 2
 fi
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${KEXT_SOURCE}/Contents/Info.plist")"
-if [[ "${VERSION}" != '1.0.1' ]]; then
-    echo "Expected crash-review build 1.0.1, got ${VERSION}. Refusing the historical build." >&2
+if [[ "${VERSION}" != '1.0.2' ]]; then
+    echo "Expected freeze-fix build 1.0.2, got ${VERSION}. Refusing older build." >&2
     exit 2
 fi
 /usr/bin/codesign --verify --strict "${KEXT_SOURCE}"

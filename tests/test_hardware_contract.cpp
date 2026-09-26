@@ -1,4 +1,5 @@
 #include "RTL8723BE_hw.hpp"
+#include "RTL8723BE_tables.hpp"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -46,6 +47,28 @@ int main() {
     assert(!rtlDmaRangeValid(0x10000001, 256, 256));
     assert(!rtlDmaRangeValid(0x10000000, 0, 256));
 
+    // Verify MAC_1T_ARRAY (8-bit registers), PHY_REG_1T, AGCTAB_1T, and 6-tuple PHY_REG_ARRAY_PG
+    // never produce an out-of-bounds BAR2 (>= 0x4000) or unaligned 32-bit BB address.
+    assert(RTL8723BEMAC_1T_ARRAYLEN % 2 == 0);
+    for (size_t i = 0; i < RTL8723BEMAC_1T_ARRAYLEN; i += 2) {
+        assert(RTL8723BEMAC_1T_ARRAY[i] < 0x4000U);
+        assert(RTL8723BEMAC_1T_ARRAY[i + 1] <= 0xFFU);
+    }
+    assert(RTL8723BEPHY_REG_1TARRAYLEN % 2 == 0);
+    for (size_t i = 0; i < RTL8723BEPHY_REG_1TARRAYLEN; i += 2) {
+        uint32_t addr = RTL8723BEPHY_REG_1TARRAY[i];
+        assert(addr < 0x4000U);
+        assert((addr & 0x3U) == 0);
+    }
+    assert(RTL8723BEPHY_REG_ARRAY_PGLEN % 6 == 0);
+    for (size_t i = 0; i < RTL8723BEPHY_REG_ARRAY_PGLEN; i += 6) {
+        uint32_t addr = RTL8723BEPHY_REG_ARRAY_PG[i + 3];
+        uint32_t mask = RTL8723BEPHY_REG_ARRAY_PG[i + 4];
+        assert(addr >= 0x800U && addr < 0x4000U);
+        assert((addr & 0x3U) == 0);
+        assert(mask != 0);
+    }
+
     RxDesc32 rx = {};
     rx.set_buffer_addr(0x23456000);
     rx.set_length(2048);
@@ -54,5 +77,5 @@ int main() {
     assert(sizeof(rx) == 32);
     assert(wordAt(&rx, 24) == 0x23456000);
     assert(wordAt(&rx, 0) == 0xC0000800);
-    std::puts("Production hardware contract: PASS (descriptor ABI, links, queues, registers, DMA limits)");
+    std::puts("Production hardware contract: PASS (descriptor ABI, links, queues, registers, tables, DMA limits)");
 }

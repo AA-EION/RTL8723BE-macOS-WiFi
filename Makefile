@@ -67,7 +67,7 @@ clean:
 # Production descriptor ABI checks, independent of the legacy simulated driver.
 test-hardware:
 	@mkdir -p build
-	$(CXX) -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc tests/test_hardware_contract.cpp -o build/test_hardware_contract
+	$(CXX) -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc tests/test_hardware_contract.cpp src/RTL8723BE_tables.cpp -o build/test_hardware_contract
 	./build/test_hardware_contract
 
 .PHONY: test-crypto

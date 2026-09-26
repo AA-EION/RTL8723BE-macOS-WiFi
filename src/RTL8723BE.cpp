@@ -420,34 +420,55 @@ IOReturn RTL8723BE::getHardwareAddress(IOEthernetAddress *addrP) {
 // ============================================================================
 
 uint8_t RTL8723BE::mmio_read8(uint32_t offset) {
-    if (!fMMIOBase) return 0;
+    if (!fMMIOBase || offset >= 0x4000U) return 0;
     return *(volatile uint8_t*)(fMMIOBase + offset);
 }
 
 uint16_t RTL8723BE::mmio_read16(uint32_t offset) {
-    if (!fMMIOBase) return 0;
+    if (!fMMIOBase || offset + 1U >= 0x4000U) return 0;
+    if ((offset & 0x1U) != 0) {
+        return (uint16_t)mmio_read8(offset) | ((uint16_t)mmio_read8(offset + 1U) << 8);
+    }
     return *(volatile uint16_t*)(fMMIOBase + offset);
 }
 
 uint32_t RTL8723BE::mmio_read32(uint32_t offset) {
-    if (!fMMIOBase) return 0;
+    if (!fMMIOBase || offset + 3U >= 0x4000U) return 0;
+    if ((offset & 0x3U) != 0) {
+        return (uint32_t)mmio_read8(offset) |
+               ((uint32_t)mmio_read8(offset + 1U) << 8) |
+               ((uint32_t)mmio_read8(offset + 2U) << 16) |
+               ((uint32_t)mmio_read8(offset + 3U) << 24);
+    }
     return *(volatile uint32_t*)(fMMIOBase + offset);
 }
 
 void RTL8723BE::mmio_write8(uint32_t offset, uint8_t val) {
-    if (!fMMIOBase) return;
+    if (!fMMIOBase || offset >= 0x4000U) return;
     *(volatile uint8_t*)(fMMIOBase + offset) = val;
     OSSynchronizeIO();
 }
 
 void RTL8723BE::mmio_write16(uint32_t offset, uint16_t val) {
-    if (!fMMIOBase) return;
+    if (!fMMIOBase || offset + 1U >= 0x4000U) return;
+    if ((offset & 0x1U) != 0) {
+        mmio_write8(offset, (uint8_t)(val & 0xFFU));
+        mmio_write8(offset + 1U, (uint8_t)((val >> 8) & 0xFFU));
+        return;
+    }
     *(volatile uint16_t*)(fMMIOBase + offset) = val;
     OSSynchronizeIO();
 }
 
 void RTL8723BE::mmio_write32(uint32_t offset, uint32_t val) {
-    if (!fMMIOBase) return;
+    if (!fMMIOBase || offset + 3U >= 0x4000U) return;
+    if ((offset & 0x3U) != 0) {
+        mmio_write8(offset, (uint8_t)(val & 0xFFU));
+        mmio_write8(offset + 1U, (uint8_t)((val >> 8) & 0xFFU));
+        mmio_write8(offset + 2U, (uint8_t)((val >> 16) & 0xFFU));
+        mmio_write8(offset + 3U, (uint8_t)((val >> 24) & 0xFFU));
+        return;
+    }
     *(volatile uint32_t*)(fMMIOBase + offset) = val;
     OSSynchronizeIO();
 }
@@ -489,51 +510,52 @@ bool RTL8723BE::powerOn() {
     // 1. Power unlock: write 0x00 to REG_RSV_CTRL (0x001C)
     mmio_write8(REG_RSV_CTRL, 0x00);
 
-    // 2. Clear auto power down in REG_APS_FSMCO+1 (0x0005)
-    uint8_t aps = mmio_read8(REG_APS_FSMCO + 1);
-    mmio_write8(REG_APS_FSMCO + 1, aps & ~0x80);
+    // 2. RTL8723B_TRANS_CARDDIS_TO_CARDEMU & CARDEMU_TO_ACT (Linux pwrseq.h):
+    // Clear APD_FEN (BIT 7), SUS (BIT 3..4), and WL_HWPDN_SL (BIT 2) in REG_APS_FSMCO+1 (0x0005)
+    mmio_write8(REG_APS_FSMCO + 1, mmio_read8(REG_APS_FSMCO + 1) & ~0x9CU);
 
-    // 3. Clear suspend and powerdown in 0x0005
-    mmio_write8(REG_APS_FSMCO + 1, mmio_read8(REG_APS_FSMCO + 1) & ~0x88);
-
-    // 4. Start PCIe DMA clock: write 0x00 to 0x0301
+    // 3. Start PCIe DMA clock: write 0x00 to 0x0301
     mmio_write8(0x0301, 0x00);
 
-    // 5. Clocks and Function Enable: REG_SYS_FUNC_EN (0x0002) & REG_SYS_CLKR (0x0008)
-    mmio_write16(REG_SYS_FUNC_EN, 0x0405); // PCIe DMA enable + CPU clock/unreset
-    mmio_write16(REG_SYS_CLKR, 0x0808);    // MAC clock enable + Ring enable
+    // 4. Release analog isolation: clear bit 5 and bit 7 of REG_SYS_ISO_CTRL (0x0000)
+    mmio_write8(REG_SYS_ISO_CTRL, mmio_read8(REG_SYS_ISO_CTRL) & ~0xA0U);
 
-    // 6. Release analog isolation: clear bit 5 of 0x0000
-    uint8_t iso = mmio_read8(REG_SYS_ISO_CTRL);
-    mmio_write8(REG_SYS_ISO_CTRL, iso & ~0x20);
-
-    // 7. Disable software LPS: clear bits 2, 3, 4 of 0x0005
-    uint8_t aps_lps = mmio_read8(REG_APS_FSMCO + 1);
-    mmio_write8(REG_APS_FSMCO + 1, aps_lps & ~0x1C);
-
-    // 8. Poll power stability (REG_PWR_STATUS 0x0006 bit 1 == 1)
-    int timeout = 25;
+    // 5. Poll power stability (REG_PWR_STATUS 0x0006 bit 1 == 1)
+    int timeout = 50;
     while (timeout-- > 0) {
-        if (mmio_read8(REG_PWR_STATUS) & 0x02) break;
-        IODelay(200);
+        if (mmio_read8(REG_PWR_STATUS) & 0x02U) break;
+        IODelay(100);
     }
-
     if (timeout < 0) {
-        IOLog("RTL8723BE: Power stability poll timed out\n");
+        IOLog("RTL8723BE: Power stability poll (0x0006 BIT1) timed out\n");
         return false;
     }
 
-    // 9. Core Activation
-    mmio_write8(REG_MULTI_FUNC_CTRL, mmio_read8(REG_MULTI_FUNC_CTRL) | 0x08);
-    mmio_write8(REG_APS_FSMCO, mmio_read8(REG_APS_FSMCO) | 0x10);
-    mmio_write8(REG_SYS_CLKR, mmio_read8(REG_SYS_CLKR) | 0x08);
+    // 6. Release WL_ISO (set BIT 0 in REG_PWR_STATUS 0x0006)
+    mmio_write8(REG_PWR_STATUS, mmio_read8(REG_PWR_STATUS) | 0x01U);
 
-    mmio_write8(REG_HWSEQ_CTRL, 0x7F);
-    IODelay(500);
+    // 7. Trigger hardware power-on state machine: set APFM_ONMAC (BIT 0) in 0x0005 and wait until it clears
+    mmio_write8(REG_APS_FSMCO + 1, mmio_read8(REG_APS_FSMCO + 1) | 0x01U);
+    int fsm_wait = 100;
+    while (fsm_wait-- > 0) {
+        if ((mmio_read8(REG_APS_FSMCO + 1) & 0x01U) == 0) break;
+        IODelay(100);
+    }
+
+    // 8. Preserve FEN_PCIEA (BIT 6), FEN_PPLL (BIT 7), FEN_PCIED (BIT 8) in REG_SYS_FUNC_EN (0x0002)
+    // and SYS_CLK_EN in REG_SYS_CLKR (0x0008) using masked read-modify-write!
+    mmio_write16(REG_SYS_FUNC_EN, mmio_read16(REG_SYS_FUNC_EN) | 0x0DC3U);
+    mmio_write16(REG_SYS_CLKR, mmio_read16(REG_SYS_CLKR) | 0x0838U);
+
+    // 9. Core Activation
+    mmio_write8(REG_MULTI_FUNC_CTRL, mmio_read8(REG_MULTI_FUNC_CTRL) | 0x08U);
+    mmio_write8(REG_APS_FSMCO, mmio_read8(REG_APS_FSMCO) | 0x10U);
+    mmio_write8(REG_HWSEQ_CTRL, 0x7FU);
+    IODelay(200);
 
     // Keep MAC TX/RX off until valid DMA rings are installed. PCI bus mastering
     // remains disabled throughout initialization, including firmware/LLT work.
-    mmio_write16(REG_CR, 0x023F);
+    mmio_write16(REG_CR, 0x023FU);
 
     fPowerState = POWER_ACT;
     return true;
@@ -788,29 +810,93 @@ bool RTL8723BE::downloadFirmware(const uint8_t *fwBuf, size_t fwLen) {
 // ============================================================================
 
 bool RTL8723BE::initBasebandAndRF() {
-    // 1. Load MAC 1T Array
-    for (size_t i = 0; i < RTL8723BEMAC_1T_ARRAYLEN; i += 2) {
-        mmio_write32(RTL8723BEMAC_1T_ARRAY[i], RTL8723BEMAC_1T_ARRAY[i + 1]);
+    if (!fMMIOBase || mmio_read32(0x0000) == 0xFFFFFFFFU) return false;
+
+    // 0. Enable BB & RF blocks before accessing 0x800+ BB/PHY or 0x840 LSSI registers
+    mmio_write16(REG_SYS_FUNC_EN, mmio_read16(REG_SYS_FUNC_EN) | 0x2003U);
+    mmio_write8(REG_RF_CTRL, 0x07U);
+    IODelay(10);
+
+    // 1. Load MAC 1T Array (8-bit byte register writes per Linux _rtl8723be_phy_config_mac_with_headerfile)
+    for (size_t i = 0; i + 1 < RTL8723BEMAC_1T_ARRAYLEN; i += 2) {
+        uint32_t addr = RTL8723BEMAC_1T_ARRAY[i];
+        uint8_t  val  = (uint8_t)(RTL8723BEMAC_1T_ARRAY[i + 1] & 0xFFU);
+        if (addr < 0x4000U) {
+            mmio_write8(addr, val);
+        }
     }
 
-    // 2. Load PHY Reg 1T Array
-    for (size_t i = 0; i < RTL8723BEPHY_REG_1TARRAYLEN; i += 2) {
-        mmio_write32(RTL8723BEPHY_REG_1TARRAY[i], RTL8723BEPHY_REG_1TARRAY[i + 1]);
+    // 2. Load PHY Reg 1T Array (32-bit aligned BB registers)
+    for (size_t i = 0; i + 1 < RTL8723BEPHY_REG_1TARRAYLEN; i += 2) {
+        uint32_t addr = RTL8723BEPHY_REG_1TARRAY[i];
+        uint32_t val  = RTL8723BEPHY_REG_1TARRAY[i + 1];
+        if (addr >= 0xF9U && addr <= 0xFEU) {
+            IODelay(100);
+            continue;
+        }
+        if (addr < 0x4000U) {
+            mmio_write32(addr, val);
+            IODelay(1);
+        }
     }
 
     // 3. Load AGC Tab 1T Array
-    for (size_t i = 0; i < RTL8723BEAGCTAB_1TARRAYLEN; i += 2) {
-        mmio_write32(RTL8723BEAGCTAB_1TARRAY[i], RTL8723BEAGCTAB_1TARRAY[i + 1]);
+    for (size_t i = 0; i + 1 < RTL8723BEAGCTAB_1TARRAYLEN; i += 2) {
+        uint32_t addr = RTL8723BEAGCTAB_1TARRAY[i];
+        uint32_t val  = RTL8723BEAGCTAB_1TARRAY[i + 1];
+        if (addr < 0x4000U) {
+            mmio_write32(addr, val);
+            IODelay(1);
+        }
     }
 
-    // 4. Load PHY Reg PG Array
-    for (size_t i = 0; i < RTL8723BEPHY_REG_ARRAY_PGLEN; i += 2) {
-        mmio_write32(RTL8723BEPHY_REG_ARRAY_PG[i], RTL8723BEPHY_REG_ARRAY_PG[i + 1]);
+    // 4. Load PHY Reg PG Array — 6-tuple format: (rfpath, txnum, band, addr, bitmask, data)
+    for (size_t i = 0; i + 5 < RTL8723BEPHY_REG_ARRAY_PGLEN; i += 6) {
+        uint32_t addr = RTL8723BEPHY_REG_ARRAY_PG[i + 3];
+        uint32_t mask = RTL8723BEPHY_REG_ARRAY_PG[i + 4];
+        uint32_t data = RTL8723BEPHY_REG_ARRAY_PG[i + 5];
+        if (addr < 0x4000U && mask != 0) {
+            uint32_t orig  = mmio_read32(addr);
+            uint32_t shift = (uint32_t)__builtin_ctz(mask);
+            mmio_write32(addr, (orig & ~mask) | ((data << shift) & mask));
+            IODelay(1);
+        }
     }
 
-    // 5. Load RF Radio A 1T Array (via 3-wire LSSI serial interface)
-    for (size_t i = 0; i < RTL8723BE_RADIOA_1TARRAYLEN; i += 2) {
-        writeRFRegister((uint8_t)RTL8723BE_RADIOA_1TARRAY[i], RTL8723BE_RADIOA_1TARRAY[i + 1]);
+    // 5. Load RF Radio A 1T Array (via 3-wire LSSI serial interface, handling ODM branch tags & delays)
+    bool skip_branch = false;
+    for (size_t i = 0; i + 1 < RTL8723BE_RADIOA_1TARRAYLEN; i += 2) {
+        uint32_t v1 = RTL8723BE_RADIOA_1TARRAY[i];
+        uint32_t v2 = RTL8723BE_RADIOA_1TARRAY[i + 1];
+
+        uint32_t tag = (v1 >> 28) & 0xFU;
+        if (tag == 0x8U || tag == 0x9U) {
+            // Conditional IF / ELSE_IF header (followed by 0x40000000, 0x00000000):
+            // Skip specialized board branches and take the default ELSE (0xA) branch
+            skip_branch = true;
+            continue;
+        } else if (tag == 0xAU) {
+            // ELSE default branch: execute entries
+            skip_branch = false;
+            continue;
+        } else if (tag == 0xBU) {
+            // ENDIF marker
+            skip_branch = false;
+            continue;
+        } else if (tag == 0x4U) {
+            continue;
+        }
+
+        if (skip_branch) continue;
+
+        if (v1 >= 0xF9U && v1 <= 0xFEU) {
+            IODelay(100);
+            continue;
+        }
+
+        if (v1 <= 0xEFU) {
+            writeRFRegister((uint8_t)v1, v2);
+        }
     }
 
     // 6. Set Default Channel
@@ -839,6 +925,8 @@ bool RTL8723BE::setChannel(uint8_t channel, uint8_t bw) {
 
 IOReturn RTL8723BE::setAntennaPath(uint8_t ant) {
     if (ant != 1 && ant != 2) return kIOReturnBadArgument;
+    // RTL8723BE Main (#1) vs Aux (#2) SPDT RF switch (0x0948 and 0x092C)
+    mmio_write32(0x0948, (ant == 2) ? 0x00000280U : 0x00000000U);
     mmio_write32(REG_BB_PAD_CTRL, ant);
     fActiveAntenna = ant;
     IOLog("RTL8723BE: Switched antenna path to %d (%s)\n",
