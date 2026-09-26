@@ -57,10 +57,16 @@ cat > "${STAGING_DIR}/config_plist_kernel_add_snippet.plist" <<'EOF'
 </dict>
 EOF
 
-# If an OpenCore EFI partition is currently mounted under /Volumes/EFI or /Volumes/ESP, stage automatically if writable
-for VOL in "/Volumes/EFI" "/Volumes/ESP"; do
+# Auto-mount disk0s1 OpenCore EFI partition if running as root (sudo)
+if [[ "${EUID}" -eq 0 ]]; then
+    mkdir -p /Volumes/EFI
+    diskutil mount -mountPoint /Volumes/EFI disk0s1 >/dev/null 2>&1 || diskutil mount disk0s1 >/dev/null 2>&1 || true
+fi
+
+# If an OpenCore EFI partition is mounted under /Volumes/EFI or /Volumes/ESP, install/update automatically
+for VOL in "/Volumes/EFI" "/Volumes/ESP" "/Volumes/EFI_Mount"; do
     if [[ -d "${VOL}/EFI/OC/Kexts" && -w "${VOL}/EFI/OC/Kexts" ]]; then
-        echo "[*] Detected mounted OpenCore EFI at ${VOL}/EFI/OC — copying RTL8723BEWiFi.kext..."
+        echo "[*] Detected mounted OpenCore EFI at ${VOL}/EFI/OC — updating RTL8723BEWiFi.kext..."
         rm -rf "${VOL}/EFI/OC/Kexts/RTL8723BEWiFi.kext"
         cp -R "${KEXT_SRC}" "${VOL}/EFI/OC/Kexts/RTL8723BEWiFi.kext"
         python3 - "${VOL}/EFI/OC/config.plist" <<'PYEOF'
@@ -85,19 +91,20 @@ if os.path.exists(cfg_path):
             plistlib.dump(pl, f)
         print(f"[+] Injected RTL8723BEWiFi.kext into {cfg_path}")
     else:
-        print(f"[+] RTL8723BEWiFi.kext already enabled in {cfg_path}")
+        print(f"[+] Updated RTL8723BEWiFi.kext binary in {cfg_path}")
 PYEOF
     fi
 done
 
 if [[ "${1:-}" == "--load" ]]; then
-    echo "[*] Preparing root-owned kext in /tmp/RTL8723BEWiFi.kext and invoking kmutil load..."
+    echo "[*] Unloading any previous com.rtl8723be.macos.wifi instance and replacing /tmp/RTL8723BEWiFi.kext..."
+    sudo kmutil unload -b com.rtl8723be.macos.wifi 2>/dev/null || true
     sudo rm -rf /tmp/RTL8723BEWiFi.kext
     sudo cp -R "${KEXT_SRC}" /tmp/RTL8723BEWiFi.kext
     sudo chown -R root:wheel /tmp/RTL8723BEWiFi.kext
     sudo chmod -R 755 /tmp/RTL8723BEWiFi.kext
     sudo kmutil load -p /tmp/RTL8723BEWiFi.kext
-    echo "[+] Kernel extension load requested! Checking IORegistry..."
+    echo "[+] Patched kernel extension loaded! Checking IORegistry..."
     ioreg -l | grep -A 15 "RTL8723BE" || true
 fi
 
