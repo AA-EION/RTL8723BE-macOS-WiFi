@@ -21,17 +21,17 @@ if [[ ! -d "${KEXT_SOURCE}" ]]; then
 fi
 LOADED="$(/usr/bin/kmutil showloaded 2>&1)"
 if [[ "${LOADED}" == *com.rtl8723be.macos.wifi* ]]; then
-    if /usr/sbin/ioreg -c RTL8723BE | /usr/bin/grep -q "RTL8723BE"; then
-        echo "An RTL8723BE kext instance is actively attached. Reboot before testing another build; hot unload of active hardware is disabled." >&2
+    echo "Closing UserClient apps and unloading previous com.rtl8723be.macos.wifi kext..."
+    /usr/bin/killall RTL8723BEWirelessUtility rtl8723be_cli 2>/dev/null || true
+    sleep 1
+    /sbin/kextunload -b com.rtl8723be.macos.wifi || {
+        echo "Could not hot-unload active kext; please reboot once to load v1.0.3." >&2
         exit 2
-    else
-        echo "Previous RTL8723BE kext did not attach (0 active instances). Unloading unreferenced kext bundle..."
-        /sbin/kextunload -b com.rtl8723be.macos.wifi || true
-    fi
+    }
 fi
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${KEXT_SOURCE}/Contents/Info.plist")"
-if [[ "${VERSION}" != '1.0.2' ]]; then
-    echo "Expected freeze-fix build 1.0.2, got ${VERSION}. Refusing older build." >&2
+if [[ "${VERSION}" != '1.0.3' ]]; then
+    echo "Expected RX/RF/LED-fix build 1.0.3, got ${VERSION}. Refusing older build." >&2
     exit 2
 fi
 /usr/bin/codesign --verify --strict "${KEXT_SOURCE}"

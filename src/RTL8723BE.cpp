@@ -270,8 +270,24 @@ bool RTL8723BE::start(IOService *provider) {
         IOLog("RTL8723BE: eFuse read fallback to default MAC\n");
     }
     memcpy(fMyMAC, fCalib.mac_addr, 6);
-    IOLog("RTL8723BE: Hardware MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-          fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5]);
+    IOLog("RTL8723BE: Hardware MAC: %02x:%02x:%02x:%02x:%02x:%02x (xtal=0x%02x)\n",
+          fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5], fCalib.crystal_cap);
+
+    // Program MAC address into REG_MACID (0x0610..0x0615)
+    for (int i = 0; i < 6; ++i) {
+        mmio_write8(0x0610U + (uint32_t)i, fMyMAC[i]);
+    }
+
+    // IMPORTANT: downloadFirmware() uses 0x1000..0x1FFF (shared Packet Buffer SRAM) while MCUFWDL_EN=1,
+    // so downloadFirmware() MUST run BEFORE initLLT() and initDMARings()!
+    if (!downloadFirmware(rtl8723befw_bin, rtl8723befw_bin_len)) {
+        IOLog("RTL8723BE: Firmware download failed; aborting startup\n");
+        cleanupResources();
+        super::stop(provider);
+        return false;
+    } else {
+        IOLog("RTL8723BE: 8051 MCU firmware loaded and initialized successfully\n");
+    }
 
     if (!initLLT()) {
         IOLog("RTL8723BE: LLT/FIFO initialization failed\n");
@@ -287,21 +303,26 @@ bool RTL8723BE::start(IOService *provider) {
         return false;
     }
 
-    if (!downloadFirmware(rtl8723befw_bin, rtl8723befw_bin_len)) {
-        IOLog("RTL8723BE: Firmware download failed; aborting startup\n");
-        cleanupResources();
-        super::stop(provider);
-        return false;
-    } else {
-        IOLog("RTL8723BE: 8051 MCU firmware loaded and initialized successfully\n");
-    }
-
     if (!initBasebandAndRF()) {
         IOLog("RTL8723BE: Baseband/RF initialization failed\n");
         cleanupResources();
         super::stop(provider);
         return false;
     }
+
+    // Re-assert FIFO boundaries and RX filter after MAC/BB table loads:
+    // RCR_AMF (BIT 20 = 0x00100000) | RCR_ADF (BIT 18 = 0x00040000) | RCR_AB | RCR_AM | RCR_APM | RCR_AAP
+    mmio_write16(0x06A0, 0xFFFFU); // REG_RXFLTMAP0: accept all Management frames (Beacons & Probe Responses!)
+    mmio_write16(0x06A2, 0xFFFFU); // REG_RXFLTMAP1: accept Control frames
+    mmio_write16(0x06A4, 0xFFFFU); // REG_RXFLTMAP2: accept all Data frames
+    mmio_write32(REG_RCR, 0x00142A0FU);
+
+    // Turn ON HP Wireless LED (active-low LED0/LED1 at REG_LEDCFG2 0x004E, REG_LEDCFG1 0x004D, REG_LEDCFG0 0x004C)
+    mmio_write8(0x004E, (mmio_read8(0x004E) & 0x90U) | 0x20U);
+    mmio_write8(0x004D, mmio_read8(0x004D) & 0x10U);
+    mmio_write8(0x004C, mmio_read8(0x004C) & 0x70U);
+    IOLog("RTL8723BE: GPIO_PIN_CTRL(0x0044)=0x%08x LEDCFG2(0x004E)=0x%02x RCR(0x0608)=0x%08x\n",
+          mmio_read32(0x0044), mmio_read8(0x004E), mmio_read32(REG_RCR));
 
     // Select a vector advertised as MSI, rather than assuming index 1 exists.
     int irqIndex = 0;
@@ -359,8 +380,6 @@ bool RTL8723BE::start(IOService *provider) {
         medium->release();
     }
 
-    // Keep MAC RX filter masked during attach; enable DMA & MAC TX/RX when interface is enabled or scanning.
-    mmio_write32(REG_RCR, 0x00002A0EU);
     OSSynchronizeIO();
     if (!attachInterface((IONetworkInterface**)&fNetif, true)) {
         IOLog("RTL8723BE: Failed to attach network interface\n");
@@ -372,7 +391,7 @@ bool RTL8723BE::start(IOService *provider) {
     setAntennaPath(2); // Aux port 2 for HP
 
     registerService();
-    IOLog("RTL8723BE: Driver v1.0.2 initialized and attached successfully\n");
+    IOLog("RTL8723BE: Driver v1.0.3 initialized and attached successfully\n");
     return true;
 }
 
@@ -397,7 +416,11 @@ IOReturn RTL8723BE::enable(IONetworkInterface *netif) {
         fPCIDevice->setBusMasterEnable(true);
     }
     mmio_write16(REG_CR, 0x02FFU);
-    mmio_write32(REG_RCR, 0x00002A0EU);
+    mmio_write16(0x06A0, 0xFFFFU);
+    mmio_write16(0x06A2, 0xFFFFU);
+    mmio_write16(0x06A4, 0xFFFFU);
+    mmio_write32(REG_RCR, 0x00142A0FU);
+    mmio_write8(0x004E, (mmio_read8(0x004E) & 0x90U) | 0x20U);
     mmio_write32(REG_HISR, 0xFFFFFFFFU);
     fHIMRMask = IMR_ROK | IMR_RDU | IMR_BEDOK | IMR_BKDOK |
                 IMR_MGNTDOK | IMR_HIGHDOK | IMR_VODOK | IMR_VIDOK;
@@ -635,28 +658,31 @@ bool RTL8723BE::initLLT() {
 // ============================================================================
 
 bool RTL8723BE::readEfuse(CalibData &outCalib) {
-    uint8_t shadow_map[512];
-    memset(shadow_map, 0xFF, 512);
+    uint8_t phys_efuse[512];
+    memset(phys_efuse, 0xFF, sizeof(phys_efuse));
 
     if (fMMIOBase && mmio_read32(0x0000) != 0xFFFFFFFFU) {
         // Enable eFuse access
         mmio_write8(REG_EFUSE_ACCESS, 0x69);
 
-        // Read key eFuse offsets (0x00..0x20 for TX power and 0xB0..0xE0 for crystal/MAC/IDs)
-        for (uint16_t addr = 0; addr < 0xE8; ++addr) {
-            if (addr >= 0x20 && addr < 0xB8) continue;
-            uint32_t cmd = ((uint32_t)addr << 8) | (0x72U << 24) | 0x80000000U;
+        // Read physical eFuse PG stream (0x0000..0x01FF):
+        // Write addr in [17:8] with BIT(31)=0 (read trigger); hardware sets BIT(31)=1 when data [7:0] is ready!
+        for (uint16_t addr = 0; addr < 512; ++addr) {
+            uint32_t cmd = ((uint32_t)(addr & 0x3FFU) << 8);
             mmio_write32(REG_EFUSE_CTRL, cmd);
 
-            int retry = 40;
+            int retry = 60;
             while (retry-- > 0) {
                 uint32_t res = mmio_read32(REG_EFUSE_CTRL);
                 if (res == 0xFFFFFFFFU) break;
-                if ((res & 0x80000000U) == 0) {
-                    shadow_map[addr] = (uint8_t)(res & 0xFF);
+                if ((res & 0x80000000U) != 0) {
+                    phys_efuse[addr] = (uint8_t)(res & 0xFFU);
                     break;
                 }
                 IODelay(2);
+            }
+            if (addr > 4 && phys_efuse[addr] == 0xFF && phys_efuse[addr - 1] == 0xFF) {
+                break; // End of PG stream
             }
         }
 
@@ -664,31 +690,15 @@ bool RTL8723BE::readEfuse(CalibData &outCalib) {
         mmio_write8(REG_EFUSE_ACCESS, 0x00);
     }
 
-    // Extract fields
-    memcpy(outCalib.mac_addr, &shadow_map[0x00D0], 6);
-    outCalib.crystal_cap = shadow_map[0x00B9];
-    outCalib.thermal_meter = shadow_map[0x00BA];
-    outCalib.channel_plan = shadow_map[0x00B8];
+    // Decode physical PG stream into logical shadow map (0x00D0 = MAC, 0x00B9 = crystal_cap, etc.)
+    decodePGStream(phys_efuse, sizeof(phys_efuse), outCalib);
 
-    memcpy(outCalib.tx_pwr_cck, &shadow_map[0x0010], 6);
-    memcpy(outCalib.tx_pwr_ht40, &shadow_map[0x0016], 5);
-    outCalib.tx_pwr_ht20_diff = shadow_map[0x001B];
-
-    outCalib.vid  = (uint16_t)(shadow_map[0x00D6] | (((uint16_t)shadow_map[0x00D7]) << 8));
-    outCalib.did  = (uint16_t)(shadow_map[0x00D8] | (((uint16_t)shadow_map[0x00D9]) << 8));
-    outCalib.svid = (uint16_t)(shadow_map[0x00DA] | (((uint16_t)shadow_map[0x00DB]) << 8));
-    outCalib.smid = (uint16_t)(shadow_map[0x00DC] | (((uint16_t)shadow_map[0x00DD]) << 8));
-
-    // Fallbacks if blank/unprogrammed (0xFF or 0x00)
-    if ((outCalib.mac_addr[0] == 0xFF && outCalib.mac_addr[1] == 0xFF) ||
-        (outCalib.mac_addr[0] == 0x00 && outCalib.mac_addr[1] == 0x00)) {
-        uint8_t def_mac[6] = {0x00, 0xE0, 0x4C, 0x87, 0x23, 0xBE};
-        memcpy(outCalib.mac_addr, def_mac, 6);
-    }
-    if (outCalib.crystal_cap == 0xFF) outCalib.crystal_cap = 0x20;
-    if (outCalib.thermal_meter == 0xFF) outCalib.thermal_meter = 0x1A;
-    if (outCalib.tx_pwr_cck[0] == 0xFF) {
-        for (int i = 0; i < 6; ++i) outCalib.tx_pwr_cck[i] = 0x2D;
+    // Apply 40MHz crystal capacitor calibration to REG_MAC_PHY_CTRL (0x0024 bits [23:12])
+    if (fMMIOBase && mmio_read32(0x0000) != 0xFFFFFFFFU) {
+        uint8_t xtal = outCalib.crystal_cap & 0x3FU;
+        uint32_t mac_phy = mmio_read32(0x0024) & ~0x00FFF000U;
+        mac_phy |= (((uint32_t)xtal | ((uint32_t)xtal << 6)) << 12);
+        mmio_write32(0x0024, mac_phy);
     }
 
     return true;
@@ -944,7 +954,19 @@ bool RTL8723BE::initBasebandAndRF() {
         }
     }
 
-    // 6. Set Default Channel
+    // 6. Force BT Coexistence PTA switch to Wi-Fi (GNT_WL=1, GNT_BT=0) & enable BB RFE pin mux
+    // Note: RTL8723BEMAC_1T_ARRAY writes 0x765 = 0x18 (GNT_BT=1), which disconnects Wi-Fi RX from the antenna!
+    mmio_write8(0x0067, mmio_read8(0x0067) | 0x20U); // BB control for SPDT switch
+    mmio_write8(0x0041, mmio_read8(0x0041) & ~0x08U);
+    mmio_write8(0x0765, 0x00U); // Clear forced GNT_BT so WLAN owns the 2.4 GHz RF path
+    mmio_write8(0x0764, 0x00U);
+    mmio_write8(0x0930, 0x77U); // RFE_CTRL_0 & RFE_CTRL_1 mux = software BB control
+    mmio_write32(0x0944, mmio_read32(0x0944) | 0x00000003U); // Enable RFE_CTRL_0/1 output drivers
+
+    // Enable CCK (BIT 24) and OFDM (BIT 25) RX/TX blocks in rFPGA0_RFMOD (0x0800)
+    mmio_write32(0x0800, mmio_read32(0x0800) | 0x03000000U);
+
+    // 7. Set Default Channel
     setChannel(1);
 
     return true;
@@ -953,15 +975,15 @@ bool RTL8723BE::initBasebandAndRF() {
 bool RTL8723BE::setChannel(uint8_t channel, uint8_t bw) {
     if (channel < 1 || channel > 14) return false;
 
-    // Baseband 3-wire LSSI RF write: register 0x18 (RF_CHNLBW)
-    // Bits [27:20] = 0x18, Bits [9:0] = channel
-    uint32_t val = (0x18U << 20) | (channel & 0x3FF);
-    if (bw == 0) { // 20 MHz
-        val |= (1U << 10) | (1U << 11);
-    } else {       // 40 MHz
-        val |= (1U << 10);
+    // Preserve bits [19:12] = 0x17000 (VCO/PLL & RX Baseband Filter enable) in RF_CHNLBW (0x18)!
+    // Clearing bits [19:12] shuts down the 2.4 GHz VCO and RX LPF!
+    uint32_t rf_data = 0x00017000U | (channel & 0x3FFU);
+    if (bw == 0) { // 20 MHz bandwidth (bits [11:10] = 0x3 = 0xC00)
+        rf_data |= (1U << 10) | (1U << 11);
+    } else {       // 40 MHz bandwidth (bits [11:10] = 0x1 = 0x400)
+        rf_data |= (1U << 10);
     }
-    mmio_write32(REG_RFPGA0_XA_LSSI, val);
+    writeRFRegister(0x18, rf_data);
     IODelay(1000); // PLL lock delay
 
     fCurrentChannel = channel;
@@ -970,9 +992,18 @@ bool RTL8723BE::setChannel(uint8_t channel, uint8_t bw) {
 
 IOReturn RTL8723BE::setAntennaPath(uint8_t ant) {
     if (ant != 1 && ant != 2) return kIOReturnBadArgument;
+    // Ensure PTA grants RF to Wi-Fi (GNT_WL=1) and BB RFE drivers are enabled
+    mmio_write8(0x0067, mmio_read8(0x0067) | 0x20U);
+    mmio_write8(0x0765, 0x00U);
+    mmio_write8(0x0930, 0x77U);
+    mmio_write32(0x0944, mmio_read32(0x0944) | 0x00000003U);
     // RTL8723BE Main (#1) vs Aux (#2) SPDT RF switch (0x0948 and 0x092C)
     mmio_write32(0x0948, (ant == 2) ? 0x00000280U : 0x00000000U);
-    mmio_write32(REG_BB_PAD_CTRL, ant);
+    mmio_write32(REG_BB_PAD_CTRL, (ant == 2) ? 0x00000002U : 0x00000001U);
+    // Also re-assert HP wireless LED ON (White) and RCR_AMF
+    mmio_write8(0x004E, (mmio_read8(0x004E) & 0x90U) | 0x20U);
+    mmio_write16(0x06A0, 0xFFFFU);
+    mmio_write32(REG_RCR, 0x00142A0FU);
     fActiveAntenna = ant;
     IOLog("RTL8723BE: Switched antenna path to %d (%s)\n",
           ant, ant == 2 ? "Auxiliary" : "Main");
@@ -1184,9 +1215,27 @@ void RTL8723BE::handleRxInterrupt() {
         size_t shift = desc->get_shift() + 8U * desc->get_drv_infosize();
         const uint8_t *src = (const uint8_t*)fRxBufMem[fRxHostIdx]->getBytesNoCopy();
 
-        if (src && len > 0 && (shift + len) <= RTL8723BE_RX_BUF_SIZE && !desc->get_crc32_err() && !desc->get_icv_err()) {
-            processRxFrame(src + shift, len);
-            fRxPackets++;
+        if (src && len > 0 && !desc->get_crc32_err() && !desc->get_icv_err()) {
+            size_t hdr_off = shift;
+            auto is80211Hdr = [](uint8_t fc0) -> bool {
+                return (fc0 & 0x03U) == 0 &&
+                       (fc0 == 0x80U || fc0 == 0x50U || fc0 == 0xB0U ||
+                        fc0 == 0x10U || fc0 == 0x30U || fc0 == 0xC0U ||
+                        fc0 == 0xA0U || (fc0 & 0x0CU) == 0x08U);
+            };
+            if ((hdr_off + len) > RTL8723BE_RX_BUF_SIZE || !is80211Hdr(src[hdr_off])) {
+                const size_t candidates[] = { 32U, 0U, 24U + shift, 56U };
+                for (size_t c : candidates) {
+                    if ((c + len) <= RTL8723BE_RX_BUF_SIZE && is80211Hdr(src[c])) {
+                        hdr_off = c;
+                        break;
+                    }
+                }
+            }
+            if ((hdr_off + len) <= RTL8723BE_RX_BUF_SIZE) {
+                processRxFrame(src + hdr_off, len);
+                fRxPackets++;
+            }
         } else if (desc->get_crc32_err()) {
             fRxErrors++;
         }

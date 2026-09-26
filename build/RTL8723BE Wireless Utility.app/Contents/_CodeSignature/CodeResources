@@ -10,11 +10,11 @@
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/Info.plist</key>
 		<data>
-		YOpOxVUJqMLP1L9j1i7YqCRELtQ=
+		eWJUr867D35V53ISOm3QZ28l9Ug=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<data>
-		JSf0OSDTzd8DJzwRDAusGc7eo54=
+		jbi/IgelmYpL/zceqC0VagmVAXA=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
 		<data>
@@ -26,7 +26,7 @@
 		</data>
 		<key>Resources/load_test_kext.sh</key>
 		<data>
-		FJFKkQDZ28TSciPZHZe/YWmnIfU=
+		60mIDLPbM+xCRSryN0H3hfb+Gjw=
 		</data>
 		<key>Resources/rtl8723be_cli</key>
 		<data>
@@ -46,14 +46,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			v8SS0d6Yo1FTJz4e7wzIhxogmEnQnT+RE3Ubt19I1WE=
+			2hTNWRwewYp/PTocl3WbU9fW+KXH3yVfium+NM3Pe88=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			2innGbPvt8qe3+VjC71WiT5UDz0+mzOyxbrZZgGYw2o=
+			xHxb7XpU04n+k23OCljdq7okYZsXL9Sk1/x+ojrOTyc=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
@@ -74,7 +74,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			Dy7vtBu53LaapRIlz2DZHVRjli06wT2nGmVS2FCX+t8=
+			epHk3/VceSbZ3+So7z4YKCPB5d+pxbCvJMmMBdkdWvQ=
 			</data>
 		</dict>
 		<key>Resources/rtl8723be_cli</key>
