@@ -21,8 +21,13 @@ if [[ ! -d "${KEXT_SOURCE}" ]]; then
 fi
 LOADED="$(/usr/bin/kmutil showloaded 2>&1)"
 if [[ "${LOADED}" == *com.rtl8723be.macos.wifi* ]]; then
-    echo "An RTL8723BE kext is already loaded. Reboot before testing another build; hot unload is disabled." >&2
-    exit 2
+    if /usr/sbin/ioreg -c RTL8723BE | /usr/bin/grep -q "RTL8723BE"; then
+        echo "An RTL8723BE kext instance is actively attached. Reboot before testing another build; hot unload of active hardware is disabled." >&2
+        exit 2
+    else
+        echo "Previous RTL8723BE kext did not attach (0 active instances). Unloading unreferenced kext bundle..."
+        /sbin/kextunload -b com.rtl8723be.macos.wifi || true
+    fi
 fi
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${KEXT_SOURCE}/Contents/Info.plist")"
 if [[ "${VERSION}" != '1.0.2' ]]; then
