@@ -124,11 +124,11 @@ struct alignas(4) TxDesc40 {
     uint32_t dw8_txbuffaddr;
     uint32_t dw9_txbuffaddr64;
 
-    uint16_t get_pktsize() const { return dw0 & 0xFFFF; }
-    void set_pktsize(uint16_t sz) { dw0 = (dw0 & ~0xFFFF) | (sz & 0xFFFF); }
+    uint16_t get_pktsize() const { return (uint16_t)(dw0 & 0xFFFFU); }
+    void set_pktsize(uint16_t sz) { dw0 = (dw0 & ~0xFFFFU) | ((uint32_t)sz & 0xFFFFU); }
 
-    uint8_t get_offset() const { return (dw0 >> 16) & 0xFF; }
-    void set_offset(uint8_t off) { dw0 = (dw0 & ~(0xFF << 16)) | ((off & 0xFF) << 16); }
+    uint8_t get_offset() const { return (uint8_t)((dw0 >> 16) & 0xFFU); }
+    void set_offset(uint8_t off) { dw0 = (dw0 & ~(0xFFU << 16)) | (((uint32_t)off & 0xFFU) << 16); }
 
     bool get_own() const { return (dw0 & (1U << 31)) != 0; }
     void set_own(bool own) { if (own) dw0 |= (1U << 31); else dw0 &= ~(1U << 31); }
@@ -139,15 +139,15 @@ struct alignas(4) TxDesc40 {
     bool get_lastseg() const { return (dw0 & (1U << 26)) != 0; }
     void set_lastseg(bool v) { if (v) dw0 |= (1U << 26); else dw0 &= ~(1U << 26); }
 
-    uint8_t get_queuesel() const { return (dw1 >> 8) & 0x1F; }
-    void set_queuesel(uint8_t q) { dw1 = (dw1 & ~(0x1F << 8)) | ((q & 0x1F) << 8); }
+    uint8_t get_queuesel() const { return (uint8_t)((dw1 >> 8) & 0x1FU); }
+    void set_queuesel(uint8_t q) { dw1 = (dw1 & ~(0x1FU << 8)) | (((uint32_t)q & 0x1FU) << 8); }
 
     uint64_t get_buffer_addr() const {
         return ((uint64_t)dw8_txbuffaddr) | (((uint64_t)dw9_txbuffaddr64) << 32);
     }
     void set_buffer_addr(uint64_t addr) {
-        dw8_txbuffaddr = (uint32_t)(addr & 0xFFFFFFFF);
-        dw9_txbuffaddr64 = (uint32_t)((addr >> 32) & 0xFFFFFFFF);
+        dw8_txbuffaddr = (uint32_t)(addr & 0xFFFFFFFFULL);
+        dw9_txbuffaddr64 = (uint32_t)((addr >> 32) & 0xFFFFFFFFULL);
     }
 };
 
@@ -162,8 +162,8 @@ struct alignas(4) RxDesc32 {
     uint32_t dw6_bufferaddress;
     uint32_t dw7_bufferaddress64;
 
-    uint16_t get_length() const { return dw0 & 0x3FFF; }
-    void set_length(uint16_t len) { dw0 = (dw0 & ~0x3FFF) | (len & 0x3FFF); }
+    uint16_t get_length() const { return (uint16_t)(dw0 & 0x3FFFU); }
+    void set_length(uint16_t len) { dw0 = (dw0 & ~0x3FFFU) | ((uint32_t)len & 0x3FFFU); }
 
     bool get_crc32_err() const { return (dw0 & (1U << 14)) != 0; }
     void set_crc32_err(bool err) { if (err) dw0 |= (1U << 14); else dw0 &= ~(1U << 14); }
@@ -171,14 +171,14 @@ struct alignas(4) RxDesc32 {
     bool get_icv_err() const { return (dw0 & (1U << 15)) != 0; }
     void set_icv_err(bool err) { if (err) dw0 |= (1U << 15); else dw0 &= ~(1U << 15); }
 
-    uint8_t get_drv_infosize() const { return (dw0 >> 16) & 0x0F; }
-    void set_drv_infosize(uint8_t sz) { dw0 = (dw0 & ~(0x0F << 16)) | ((sz & 0x0F) << 16); }
+    uint8_t get_drv_infosize() const { return (uint8_t)((dw0 >> 16) & 0x0FU); }
+    void set_drv_infosize(uint8_t sz) { dw0 = (dw0 & ~(0x0FU << 16)) | (((uint32_t)sz & 0x0FU) << 16); }
 
-    uint8_t get_security() const { return (dw0 >> 20) & 0x07; }
-    void set_security(uint8_t sec) { dw0 = (dw0 & ~(0x07 << 20)) | ((sec & 0x07) << 20); }
+    uint8_t get_security() const { return (uint8_t)((dw0 >> 20) & 0x07U); }
+    void set_security(uint8_t sec) { dw0 = (dw0 & ~(0x07U << 20)) | (((uint32_t)sec & 0x07U) << 20); }
 
-    uint8_t get_shift() const { return (dw0 >> 24) & 0x03; }
-    void set_shift(uint8_t s) { dw0 = (dw0 & ~(0x03 << 24)) | ((s & 0x03) << 24); }
+    uint8_t get_shift() const { return (uint8_t)((dw0 >> 24) & 0x03U); }
+    void set_shift(uint8_t s) { dw0 = (dw0 & ~(0x03U << 24)) | (((uint32_t)s & 0x03U) << 24); }
 
     bool get_eor() const { return (dw0 & (1U << 30)) != 0; }
     void set_eor(bool eor) { if (eor) dw0 |= (1U << 30); else dw0 &= ~(1U << 30); }
@@ -190,8 +190,8 @@ struct alignas(4) RxDesc32 {
         return ((uint64_t)dw6_bufferaddress) | (((uint64_t)dw7_bufferaddress64) << 32);
     }
     void set_buffer_addr(uint64_t addr) {
-        dw6_bufferaddress = (uint32_t)(addr & 0xFFFFFFFF);
-        dw7_bufferaddress64 = (uint32_t)((addr >> 32) & 0xFFFFFFFF);
+        dw6_bufferaddress = (uint32_t)(addr & 0xFFFFFFFFULL);
+        dw7_bufferaddress64 = (uint32_t)((addr >> 32) & 0xFFFFFFFFULL);
     }
 };
 
