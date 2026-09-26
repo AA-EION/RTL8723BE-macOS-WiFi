@@ -2,12 +2,12 @@
 #define _RTL8723BE_HPP_
 
 #include <IOKit/IOLib.h>
+#include <sys/kpi_mbuf.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/network/IOEthernetController.h>
 #include <IOKit/network/IOEthernetInterface.h>
 #include <IOKit/network/IONetworkMedium.h>
 #include <IOKit/network/IOOutputQueue.h>
-#include <sys/kpi_mbuf.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>

@@ -1,0 +1,19 @@
+<!-- Add this entry under Kernel -> Add in your OpenCore EFI/OC/config.plist -->
+<dict>
+	<key>Arch</key>
+	<string>x86_64</string>
+	<key>BundlePath</key>
+	<string>RTL8723BEWiFi.kext</string>
+	<key>Comment</key>
+	<string>Realtek RTL8723BE PCIe Wireless LAN Driver (pci10ec,b723)</string>
+	<key>Enabled</key>
+	<true/>
+	<key>ExecutablePath</key>
+	<string>Contents/MacOS/RTL8723BEWiFi</string>
+	<key>MaxKernel</key>
+	<string></string>
+	<key>MinKernel</key>
+	<string>20.0.0</string>
+	<key>PlistPath</key>
+	<string>Contents/Info.plist</string>
+</dict>
