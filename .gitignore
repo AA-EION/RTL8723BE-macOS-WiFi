@@ -7,3 +7,6 @@ build/test_crypto_bounds
 __pycache__/
 build/AppIcon.iconset/
 build/dmg_staging/
+
+.DS_Store
+build/.DS_Store
