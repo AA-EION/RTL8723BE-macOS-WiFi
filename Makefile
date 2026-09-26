@@ -8,7 +8,7 @@ KEXT_CXXFLAGS := -arch x86_64 -mmacosx-version-min=26.5 -mkernel -fno-builtin -f
                  -Wno-deprecated-declarations \
                  -isysroot "$(SDK_PATH)" \
                  -I"$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers" \
-                 -Isrc
+                 -Isrc -MMD -MP
 
 KEXT_CFLAGS   := -arch x86_64 -mmacosx-version-min=26.5 -mkernel -fno-builtin -fno-common \
                  -nostdinc -O2 \
@@ -30,7 +30,10 @@ KEXT_OBJS     := build/RTL8723BE.o \
                  build/RTL8723BE_tables.o \
                  build/RTL8723BE_kmod.o
 
-.PHONY: all kext cli test diagnose clean
+-include $(KEXT_OBJS:.o=.d)
+
+.DEFAULT_GOAL := all
+.PHONY: all kext cli test test-hardware diagnose clean
 
 all: kext cli
 
@@ -52,7 +55,7 @@ cli: tools/rtl8723be_cli.cpp src/RTL8723BE_ipc.h
 	$(CXX) -arch x86_64 -std=c++17 -O2 -framework IOKit -framework CoreFoundation \
 		tools/rtl8723be_cli.cpp -o $(CLI_BIN)
 
-test:
+test: test-hardware
 	$(MAKE) -C tests test
 
 diagnose: kext
@@ -60,3 +63,9 @@ diagnose: kext
 
 clean:
 	rm -rf build/*.o $(KEXT_BUNDLE) $(CLI_BIN)
+
+# Production descriptor ABI checks, independent of the legacy simulated driver.
+test-hardware:
+	@mkdir -p build
+	$(CXX) -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc tests/test_hardware_contract.cpp -o build/test_hardware_contract
+	./build/test_hardware_contract

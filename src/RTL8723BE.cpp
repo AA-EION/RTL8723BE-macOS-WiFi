@@ -5,6 +5,25 @@
 #define super IOEthernetController
 OSDefineMetaClassAndStructors(RTL8723BE, IOEthernetController);
 
+// Return only prepared, contiguous buffers whose entire DMA range fits 32 bits.
+static IOBufferMemoryDescriptor *allocateDMA(size_t size, size_t alignment) {
+    IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+        size, 0xFFFFFFFFULL & ~(uint64_t(alignment) - 1));
+    if (!mem) return nullptr;
+    if (mem->prepare(kIODirectionInOut) != kIOReturnSuccess) {
+        mem->release();
+        return nullptr;
+    }
+    if (!mem->getBytesNoCopy() ||
+        !rtlDmaRangeValid(mem->getPhysicalAddress(), size, alignment)) {
+        mem->complete(kIODirectionInOut);
+        mem->release();
+        return nullptr;
+    }
+    return mem;
+}
+
 // ============================================================================
 // IOKit Lifecycle
 // ============================================================================
@@ -87,6 +106,7 @@ void RTL8723BE::cleanupResources() {
 
     if (fMMIOBase) {
         mmio_write32(REG_HIMR, 0);
+        mmio_write32(REG_HIMRE, 0);
         mmio_write32(REG_HISR, 0xFFFFFFFFU);
     }
 
@@ -106,6 +126,12 @@ void RTL8723BE::cleanupResources() {
 
     if (fMMIOBase) {
         powerOff();
+    }
+    if (fPCIDevice) {
+        // Disabling MAC alone does not revoke PCI DMA access to host memory.
+        fPCIDevice->setBusMasterEnable(false);
+        (void)fPCIDevice->configRead16(kIOPCIConfigCommand);
+        IOSleep(1);
     }
     freeDMARings();
 
@@ -166,33 +192,40 @@ bool RTL8723BE::start(IOService *provider) {
     }
 
     fPCIDevice->retain();
+    // Revoke DMA inherited from firmware/an earlier boot before touching BARs.
+    fPCIDevice->setBusMasterEnable(false);
 
-    // 1. Force PCI Power Management Capability (offset 0x40 -> PMCSR at 0x44) from D2/D3 to D0
-    uint16_t pmcsr = fPCIDevice->configRead16(0x44);
-    if ((pmcsr & 0x0003) != 0) {
-        IOLog("RTL8723BE: Waking PCI function from D%u to D0 (PMCSR=0x%04x)\n", pmcsr & 0x3, pmcsr);
-        fPCIDevice->configWrite16(0x44, (pmcsr & ~0x0003U) | 0x0100U);
-        IODelay(15000); // 15ms PCI D2/D3 -> D0 stabilization
+    // Discover capabilities; offsets are not guaranteed by PCI.
+    UInt8 pmCap = 0;
+    fPCIDevice->findPCICapability(0x01, &pmCap);
+    if (pmCap) {
+        uint16_t pmcsr = fPCIDevice->configRead16(pmCap + 4);
+        if ((pmcsr & 3) != 0) {
+            fPCIDevice->configWrite16(pmCap + 4, pmcsr & ~0x8003U);
+            IOSleep(15);
+        }
     }
-
-    // 2. Disable PCIe ASPM L0s/L1 (PCIe Capability at 0x70 -> Link Control at 0x80) to prevent MMIO freeze
-    uint16_t linkCtrl = fPCIDevice->configRead16(0x80);
-    if (linkCtrl & 0x0003U) {
-        fPCIDevice->configWrite16(0x80, linkCtrl & ~0x0003U);
+    UInt8 pcieCap = 0;
+    fPCIDevice->findPCICapability(0x10, &pcieCap);
+    if (pcieCap) {
+        uint16_t linkCtrl = fPCIDevice->configRead16(pcieCap + 0x10);
+        fPCIDevice->configWrite16(pcieCap + 0x10, linkCtrl & ~3U);
     }
 
     fPCIDevice->setIOEnable(true);
     fPCIDevice->setMemoryEnable(true);
-    fPCIDevice->setBusMasterEnable(true);
     IODelay(2000);
 
     // 3. Map BAR2 16KB 64-bit MMIO aperture (PCI Config Base Address 2 = offset 0x18)
     fMMIOMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
     if (!fMMIOMap) {
-        fMMIOMap = fPCIDevice->mapDeviceMemoryWithRegister(0x18);
-    }
-    if (!fMMIOMap) {
         IOLog("RTL8723BE: Failed to map BAR2 MMIO region\n");
+        cleanupResources();
+        super::stop(provider);
+        return false;
+    }
+    if (fMMIOMap->getLength() < 0x4000 || !fMMIOMap->getVirtualAddress()) {
+        IOLog("RTL8723BE: Invalid BAR2 aperture\n");
         cleanupResources();
         super::stop(provider);
         return false;
@@ -205,10 +238,16 @@ bool RTL8723BE::start(IOService *provider) {
     fHIMRMask = 0;
     fInterruptEnabled = false;
     mmio_write32(REG_HIMR, 0);
+    mmio_write32(REG_HIMRE, 0);
     mmio_write32(REG_HISR, 0xFFFFFFFFU);
 
     fRFLock = IOLockAlloc();
     fStateLock = IOLockAlloc();
+    if (!fRFLock || !fStateLock) {
+        cleanupResources();
+        super::stop(provider);
+        return false;
+    }
 
     fWorkLoop = getWorkLoop();
     if (!fWorkLoop) {
@@ -221,7 +260,10 @@ bool RTL8723BE::start(IOService *provider) {
 
     // 5. Hardware Power-on Sequence + eFuse + Firmware + DMA Rings BEFORE enabling interrupts!
     if (!powerOn()) {
-        IOLog("RTL8723BE: Power-on sequence warning — continuing in safe register state\n");
+        IOLog("RTL8723BE: Power-on failed; aborting startup\n");
+        cleanupResources();
+        super::stop(provider);
+        return false;
     }
 
     if (!readEfuse(fCalib)) {
@@ -232,13 +274,20 @@ bool RTL8723BE::start(IOService *provider) {
           fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5]);
 
     if (!downloadFirmware(rtl8723befw_bin, rtl8723befw_bin_len)) {
-        IOLog("RTL8723BE: Firmware download did not report WINTINI_RDY on first attempt; continuing cleanly\n");
+        IOLog("RTL8723BE: Firmware download failed; aborting startup\n");
+        cleanupResources();
+        super::stop(provider);
+        return false;
     } else {
-        IOLog("RTL8723BE: 8051 MCU Firmware v36 loaded and initialized successfully\n");
+        IOLog("RTL8723BE: 8051 MCU firmware loaded and initialized successfully\n");
     }
 
-    initBasebandAndRF();
-    initLLT();
+    if (!initBasebandAndRF() || !initLLT()) {
+        IOLog("RTL8723BE: Baseband/RF/LLT initialization failed\n");
+        cleanupResources();
+        super::stop(provider);
+        return false;
+    }
 
     if (!initDMARings()) {
         IOLog("RTL8723BE: DMA rings initialization failed\n");
@@ -247,13 +296,21 @@ bool RTL8723BE::start(IOService *provider) {
         return false;
     }
 
-    // 6. Prefer MSI interrupt index 1 (non-shared edge-triggered), fallback to index 0
+    // Select a vector advertised as MSI, rather than assuming index 1 exists.
+    int irqIndex = 0;
+    int irqType = 0;
+    for (int index = 0; fPCIDevice->getInterruptType(index, &irqType) == kIOReturnSuccess; ++index) {
+        if (irqType & kIOInterruptTypePCIMessaged) {
+            irqIndex = index;
+            break;
+        }
+    }
     fInterruptSource = IOFilterInterruptEventSource::filterInterruptEventSource(
         this,
         &RTL8723BE::interruptAction,
         &RTL8723BE::interruptFilter,
         fPCIDevice,
-        1
+        irqIndex
     );
     if (!fInterruptSource) {
         fInterruptSource = IOFilterInterruptEventSource::filterInterruptEventSource(
@@ -274,12 +331,19 @@ bool RTL8723BE::start(IOService *provider) {
 
     // 7. Create Scan Timer Event Source
     fScanTimer = IOTimerEventSource::timerEventSource(this, &RTL8723BE::scanTimerAction);
-    if (fScanTimer) {
-        fWorkLoop->addEventSource(fScanTimer);
+    if (!fScanTimer || fWorkLoop->addEventSource(fScanTimer) != kIOReturnSuccess) {
+        cleanupResources();
+        super::stop(provider);
+        return false;
     }
 
     // 8. Publish Ethernet Mediums & Attach Network Interface
     fMediumDict = OSDictionary::withCapacity(1);
+    if (!fMediumDict) {
+        cleanupResources();
+        super::stop(provider);
+        return false;
+    }
     IONetworkMedium *medium = IONetworkMedium::medium(kIOMediumEthernetAuto, 100 * 1000000);
     if (medium) {
         IONetworkMedium::addMedium(fMediumDict, medium);
@@ -288,6 +352,10 @@ bool RTL8723BE::start(IOService *provider) {
         medium->release();
     }
 
+    // All descriptors are valid before the PCI function may initiate DMA.
+    OSSynchronizeIO();
+    fPCIDevice->setBusMasterEnable(true);
+    mmio_write16(REG_CR, mmio_read16(REG_CR) | 0x00C0U);
     if (!attachInterface((IONetworkInterface**)&fNetif, true)) {
         IOLog("RTL8723BE: Failed to attach network interface\n");
         cleanupResources();
@@ -298,7 +366,7 @@ bool RTL8723BE::start(IOService *provider) {
     setAntennaPath(2); // Aux port 2 for HP
 
     registerService();
-    IOLog("RTL8723BE: Driver loaded and ready (MSI/DMA safe mode)\n");
+    IOLog("RTL8723BE: Experimental driver initialized (hardware validation pending)\n");
     return true;
 }
 
@@ -334,6 +402,7 @@ IOReturn RTL8723BE::disable(IONetworkInterface *netif) {
     fInterruptEnabled = false;
     fHIMRMask = 0;
     mmio_write32(REG_HIMR, 0);
+    mmio_write32(REG_HIMRE, 0);
     if (fInterruptSource) {
         fInterruptSource->disable();
     }
@@ -449,6 +518,11 @@ bool RTL8723BE::powerOn() {
         IODelay(200);
     }
 
+    if (timeout < 0) {
+        IOLog("RTL8723BE: Power stability poll timed out\n");
+        return false;
+    }
+
     // 9. Core Activation
     mmio_write8(REG_MULTI_FUNC_CTRL, mmio_read8(REG_MULTI_FUNC_CTRL) | 0x08);
     mmio_write8(REG_APS_FSMCO, mmio_read8(REG_APS_FSMCO) | 0x10);
@@ -457,8 +531,9 @@ bool RTL8723BE::powerOn() {
     mmio_write8(REG_HWSEQ_CTRL, 0x7F);
     IODelay(500);
 
-    // 10. Enable Command Register REG_CR (0x0100) = 0x02FF (TRX enable + MAC enable)
-    mmio_write16(REG_CR, 0x02FF);
+    // Keep MAC TX/RX off until valid DMA rings are installed. PCI bus mastering
+    // remains disabled throughout initialization, including firmware/LLT work.
+    mmio_write16(REG_CR, 0x023F);
 
     fPowerState = POWER_ACT;
     return true;
@@ -467,8 +542,9 @@ bool RTL8723BE::powerOn() {
 bool RTL8723BE::powerOff() {
     if (fMMIOBase && mmio_read32(0x0000) != 0xFFFFFFFFU) {
         mmio_write32(REG_HIMR, 0);
-        mmio_write8(REG_RSV_CTRL, 0x0E);
+        mmio_write32(REG_HIMRE, 0);
         mmio_write16(REG_CR, 0x0000);
+        mmio_write8(REG_RSV_CTRL, 0x0E);
     }
     fPowerState = POWER_CARDDIS;
     fState = kRTLStateDisconnected;
@@ -482,25 +558,25 @@ bool RTL8723BE::powerOff() {
 bool RTL8723BE::initLLT() {
     if (!fMMIOBase || mmio_read32(0x0000) == 0xFFFFFFFFU) return false;
 
-    // 1. Link normal queue pages 0..244
+    auto writeLLT = [this](uint32_t address, uint32_t next) -> bool {
+        mmio_write32(REG_LLT_INIT, (1U << 30) | (address << 8) | next);
+        for (unsigned attempt = 0; attempt < 100; ++attempt) {
+            uint32_t status = mmio_read32(REG_LLT_INIT);
+            if (status == 0xFFFFFFFFU) return false;
+            if ((status >> 30) == 0) return true;
+            IODelay(2);
+        }
+        return false;
+    };
     for (uint32_t i = 0; i < 244; ++i) {
-        uint32_t val = (1U << 30) | (i << 8) | (i + 1);
-        mmio_write32(REG_LLT_INIT, val);
-        IODelay(2);
+        if (!writeLLT(i, i + 1)) return false;
     }
-    // Terminate normal ring
-    mmio_write32(REG_LLT_INIT, (1U << 30) | (244U << 8) | 0xFF);
-    IODelay(2);
-
-    // 2. Link beacon queue pages 245..255
+    if (!writeLLT(244, 0xFF)) return false;
     for (uint32_t i = 245; i < 255; ++i) {
-        uint32_t val = (1U << 30) | (i << 8) | (i + 1);
-        mmio_write32(REG_LLT_INIT, val);
-        IODelay(2);
+        if (!writeLLT(i, i + 1)) return false;
     }
-    // Terminate beacon ring
-    mmio_write32(REG_LLT_INIT, (1U << 30) | (255U << 8) | 0xFF);
-    IODelay(2);
+    // The reserved pages form a circular list, unlike the terminated TX list.
+    if (!writeLLT(255, 245)) return false;
 
     return true;
 }
@@ -782,42 +858,29 @@ bool RTL8723BE::initDMARings() {
         size_t idx = (size_t)q;
         fTxHostIdx[idx] = 0;
 
-        fTxRingDescMem[idx] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-            kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
-            RTL8723BE_TX_DESC_COUNT * sizeof(TxDesc40),
-            0x00000000FFFFFF00ULL
-        );
+        fTxRingDescMem[idx] = allocateDMA(RTL8723BE_TX_DESC_COUNT * sizeof(TxDescPci), 256);
         if (!fTxRingDescMem[idx]) return false;
-        fTxRingDescMem[idx]->prepare(kIODirectionInOut);
 
-        fTxRingDescVirt[idx] = (TxDesc40*)fTxRingDescMem[idx]->getBytesNoCopy();
+        fTxRingDescVirt[idx] = (TxDescPci*)fTxRingDescMem[idx]->getBytesNoCopy();
         fTxRingDescPhys[idx] = fTxRingDescMem[idx]->getPhysicalAddress();
-        memset(fTxRingDescVirt[idx], 0, RTL8723BE_TX_DESC_COUNT * sizeof(TxDesc40));
+        memset(fTxRingDescVirt[idx], 0, RTL8723BE_TX_DESC_COUNT * sizeof(TxDescPci));
 
         // Allocate TX packet data buffers (< 4GB physical mask)
         for (int i = 0; i < RTL8723BE_TX_DESC_COUNT; ++i) {
-            fTxBufMem[idx][i] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-                kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
-                RTL8723BE_TX_BUF_SIZE,
-                0x00000000FFFFFFFCULL
-            );
+            fTxBufMem[idx][i] = allocateDMA(RTL8723BE_TX_BUF_SIZE, 4);
             if (!fTxBufMem[idx][i]) return false;
-            fTxBufMem[idx][i]->prepare(kIODirectionInOut);
 
             fTxRingDescVirt[idx][i].set_buffer_addr((uint32_t)(fTxBufMem[idx][i]->getPhysicalAddress() & 0xFFFFFFFFULL));
+            fTxRingDescVirt[idx][i].set_next_addr(fTxRingDescPhys[idx] +
+                (size_t(i + 1) % RTL8723BE_TX_DESC_COUNT) * sizeof(TxDescPci));
             fTxRingDescVirt[idx][i].set_own(false);
         }
     }
 
     // 2. Allocate RX Ring (< 4GB 256-byte aligned physical mask)
     fRxHostIdx = 0;
-    fRxRingDescMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
-        RTL8723BE_RX_DESC_COUNT * sizeof(RxDesc32),
-        0x00000000FFFFFF00ULL
-    );
+    fRxRingDescMem = allocateDMA(RTL8723BE_RX_DESC_COUNT * sizeof(RxDesc32), 256);
     if (!fRxRingDescMem) return false;
-    fRxRingDescMem->prepare(kIODirectionInOut);
 
     fRxRingDescVirt = (RxDesc32*)fRxRingDescMem->getBytesNoCopy();
     fRxRingDescPhys = fRxRingDescMem->getPhysicalAddress();
@@ -825,13 +888,8 @@ bool RTL8723BE::initDMARings() {
 
     // Allocate RX packet buffers (< 4GB physical mask)
     for (int i = 0; i < RTL8723BE_RX_DESC_COUNT; ++i) {
-        fRxBufMem[i] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-            kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
-            RTL8723BE_RX_BUF_SIZE,
-            0x00000000FFFFFFFCULL
-        );
+        fRxBufMem[i] = allocateDMA(RTL8723BE_RX_BUF_SIZE, 4);
         if (!fRxBufMem[i]) return false;
-        fRxBufMem[i]->prepare(kIODirectionInOut);
 
         fRxRingDescVirt[i].dw0 = 0;
         fRxRingDescVirt[i].set_length(RTL8723BE_RX_BUF_SIZE);
@@ -842,6 +900,7 @@ bool RTL8723BE::initDMARings() {
         fRxRingDescVirt[i].set_own(true); // Owned by hardware, ready to receive
     }
 
+    OSSynchronizeIO();
     // 3. Program MMIO DESA registers
     mmio_write32(REG_BKQ_DESA, (uint32_t)(fTxRingDescPhys[Q_BK] & 0xFFFFFFFFULL));
     mmio_write32(REG_BEQ_DESA, (uint32_t)(fTxRingDescPhys[Q_BE] & 0xFFFFFFFFULL));
@@ -851,6 +910,10 @@ bool RTL8723BE::initDMARings() {
     mmio_write32(REG_MGQ_DESA, (uint32_t)(fTxRingDescPhys[Q_MGNT] & 0xFFFFFFFFULL));
     mmio_write32(REG_HQ_DESA, (uint32_t)(fTxRingDescPhys[Q_HIGH] & 0xFFFFFFFFULL));
     mmio_write32(REG_RX_DESA, (uint32_t)(fRxRingDescPhys & 0xFFFFFFFFULL));
+
+    const uint32_t ringRegisters[] = {REG_BKQ_DESA, REG_BEQ_DESA, REG_VIQ_DESA,
+        REG_VOQ_DESA, REG_BCNQ_DESA, REG_MGQ_DESA, REG_HQ_DESA, REG_RX_DESA};
+    for (uint32_t reg : ringRegisters) mmio_write32(reg + 4, 0);
 
     // 4. Configure Interrupt Mitigation (4 packets threshold, 128 us timer)
     mmio_write32(REG_INT_MIG, (4U << 8) | 4U);
@@ -894,12 +957,13 @@ void RTL8723BE::freeDMARings() {
 }
 
 bool RTL8723BE::transmitRawFrame(RTLQueueId qId, const uint8_t *frame, size_t len) {
+    if (!frame || len == 0 || len > RTL8723BE_TX_BUF_SIZE) return false;
     size_t qIdx = (size_t)qId;
     if (qIdx >= 8 || !fTxRingDescVirt[qIdx] || !fTxBufMem[qIdx][fTxHostIdx[qIdx]]) {
         return false;
     }
 
-    TxDesc40 *desc = &fTxRingDescVirt[qIdx][fTxHostIdx[qIdx]];
+    TxDescPci *desc = &fTxRingDescVirt[qIdx][fTxHostIdx[qIdx]];
     if (desc->get_own()) {
         // Ring full (backpressure)
         return false;
@@ -911,11 +975,14 @@ bool RTL8723BE::transmitRawFrame(RTLQueueId qId, const uint8_t *frame, size_t le
     }
 
     desc->set_pktsize((uint16_t)len);
-    desc->set_offset(40);
+    desc->set_offset(RTL_TX_HEADER_SIZE);
+    desc->set_buffer_size((uint16_t)len);
     desc->set_firstseg(true);
     desc->set_lastseg(true);
-    desc->set_queuesel((uint8_t)qId);
-    desc->set_own(true); // Relinquish to DMA
+    desc->set_queuesel(rtlTxQueueSelect(qId));
+    OSSynchronizeIO();
+    desc->set_own(true);
+    OSSynchronizeIO(); // Relinquish to DMA
 
     // Trigger Doorbell
     uint16_t doorbell = (uint16_t)(1U << (uint8_t)qId);
@@ -979,11 +1046,12 @@ void RTL8723BE::handleRxInterrupt() {
             break; // Still owned by DMA
         }
 
+        OSSynchronizeIO(); // DMA relinquished ownership before CPU reads payload.
         uint16_t len = desc->get_length();
-        uint8_t shift = desc->get_shift();
+        size_t shift = desc->get_shift() + 8U * desc->get_drv_infosize();
         const uint8_t *src = (const uint8_t*)fRxBufMem[fRxHostIdx]->getBytesNoCopy();
 
-        if (src && len > 0 && (shift + len) <= RTL8723BE_RX_BUF_SIZE && !desc->get_crc32_err()) {
+        if (src && len > 0 && (shift + len) <= RTL8723BE_RX_BUF_SIZE && !desc->get_crc32_err() && !desc->get_icv_err()) {
             processRxFrame(src + shift, len);
             fRxPackets++;
         } else if (desc->get_crc32_err()) {

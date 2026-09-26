@@ -13,8 +13,8 @@
 #define REG_9346CR               0x000A // 8-bit
 #define REG_RSV_CTRL             0x001C // 16-bit
 #define REG_RF_CTRL              0x001F // 8-bit
-#define REG_MULTI_FUNC_CTRL      0x0020 // 8-bit
-#define REG_HWSEQ_CTRL           0x0023 // 8-bit
+#define REG_MULTI_FUNC_CTRL      0x0068 // 8-bit
+#define REG_HWSEQ_CTRL           0x0423 // 8-bit
 #define REG_EFUSE_CTRL           0x0030 // 32-bit
 #define REG_EFUSE_TEST           0x0034 // 32-bit
 #define REG_GPIO_MUXCFG          0x0040 // 16-bit
@@ -111,9 +111,12 @@ struct __attribute__((packed)) RTLFirmwareHeader {
     uint32_t rsvd5;
 };
 
-// 40-Byte TX Descriptor Layout (10 dwords = 40 bytes)
-struct alignas(4) TxDesc40 {
-    uint32_t dw0;
+// RTL8723BE: 40-byte control header followed by PCI DMA addresses.
+// Linux rtl8723be/trx.h accessors use dwords 10 (buffer) and 12 (next).
+// Match the 64-byte rtlwifi/pci.h allocation stride, not TX_DESC_SIZE.
+constexpr uint8_t RTL_TX_HEADER_SIZE = 40;
+struct alignas(4) TxDescPci {
+    volatile uint32_t dw0;
     uint32_t dw1;
     uint32_t dw2;
     uint32_t dw3;
@@ -121,8 +124,22 @@ struct alignas(4) TxDesc40 {
     uint32_t dw5;
     uint32_t dw6_reserved;
     uint32_t dw7;
-    uint32_t dw8_txbuffaddr;
-    uint32_t dw9_txbuffaddr64;
+    uint32_t dw8;
+    uint32_t dw9;
+    uint32_t dw10_txbuffaddr;
+    uint32_t dw11_txbuffaddr64;
+    uint32_t dw12_nextdesc;
+    uint32_t dw13_nextdesc64;
+    uint32_t reserved[2];
+
+    void set_buffer_size(uint16_t size) { dw7 = (dw7 & ~0xFFFFU) | size; }
+    uint64_t get_next_addr() const {
+        return uint64_t(dw12_nextdesc) | (uint64_t(dw13_nextdesc64) << 32);
+    }
+    void set_next_addr(uint64_t addr) {
+        dw12_nextdesc = uint32_t(addr);
+        dw13_nextdesc64 = uint32_t(addr >> 32);
+    }
 
     uint16_t get_pktsize() const { return (uint16_t)(dw0 & 0xFFFFU); }
     void set_pktsize(uint16_t sz) { dw0 = (dw0 & ~0xFFFFU) | ((uint32_t)sz & 0xFFFFU); }
@@ -143,17 +160,41 @@ struct alignas(4) TxDesc40 {
     void set_queuesel(uint8_t q) { dw1 = (dw1 & ~(0x1FU << 8)) | (((uint32_t)q & 0x1FU) << 8); }
 
     uint64_t get_buffer_addr() const {
-        return ((uint64_t)dw8_txbuffaddr) | (((uint64_t)dw9_txbuffaddr64) << 32);
+        return ((uint64_t)dw10_txbuffaddr) | (((uint64_t)dw11_txbuffaddr64) << 32);
     }
     void set_buffer_addr(uint64_t addr) {
-        dw8_txbuffaddr = (uint32_t)(addr & 0xFFFFFFFFULL);
-        dw9_txbuffaddr64 = (uint32_t)((addr >> 32) & 0xFFFFFFFFULL);
+        dw10_txbuffaddr = (uint32_t)(addr & 0xFFFFFFFFULL);
+        dw11_txbuffaddr64 = (uint32_t)((addr >> 32) & 0xFFFFFFFFULL);
     }
 };
 
+static_assert(sizeof(TxDescPci) == 64, "PCI TX ring stride");
+static_assert(offsetof(TxDescPci, dw10_txbuffaddr) == 40, "PCI TX buffer offset");
+static_assert(offsetof(TxDescPci, dw12_nextdesc) == 48, "PCI TX next-link offset");
+
+// Queue selector is an on-air priority/firmware queue, not the PCI doorbell bit.
+inline uint8_t rtlTxQueueSelect(RTLQueueId q) {
+    switch (q) {
+        case Q_BK: return 1;
+        case Q_BE: return 0;
+        case Q_VI: return 4;
+        case Q_VO: return 6;
+        case Q_BCN: return 0x10;
+        case Q_HIGH: return 0x11;
+        case Q_MGNT: return 0x12;
+    }
+    return 0;
+}
+
+inline bool rtlDmaRangeValid(uint64_t address, size_t size, size_t alignment) {
+    return address != 0 && size != 0 && alignment != 0 &&
+           address % alignment == 0 && address <= 0xFFFFFFFFULL &&
+           size - 1 <= 0xFFFFFFFFULL - address;
+}
+
 // 32-Byte RX Descriptor Layout (8 dwords = 32 bytes)
 struct alignas(4) RxDesc32 {
-    uint32_t dw0;
+    volatile uint32_t dw0;
     uint32_t dw1;
     uint32_t dw2;
     uint32_t dw3;

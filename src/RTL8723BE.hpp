@@ -118,7 +118,7 @@ private:
 
     // DMA Descriptors & Buffers
     IOBufferMemoryDescriptor      *fTxRingDescMem[8];
-    TxDesc40                      *fTxRingDescVirt[8];
+    TxDescPci                      *fTxRingDescVirt[8];
     uint64_t                       fTxRingDescPhys[8];
     IOBufferMemoryDescriptor      *fTxBufMem[8][RTL8723BE_TX_DESC_COUNT];
     uint16_t                       fTxHostIdx[8];

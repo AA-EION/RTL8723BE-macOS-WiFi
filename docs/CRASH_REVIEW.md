@@ -48,3 +48,39 @@ published binaries do not acquire these changes automatically.
 - [Linux v6.12 RTL8723BE descriptor accessors](https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/trx.h)
 - [Linux v6.12 PCI TX ring allocation/linking](https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtlwifi/pci.c)
 - [Linux v6.12 RTL8723BE register map](https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/reg.h)
+
+## Source fixes and validation
+
+The PCI TX slot is now 64 bytes with a 40-byte control header, buffer pointer at
+40, next pointer at 48, circular links, buffer length, and distinct queue-selector
+values. RX accounts for the PHY driver-info prefix. DMA allocation checks prepare
+success, virtual address, alignment and the entire 32-bit physical range. Both
+interrupt banks are masked during startup/shutdown. PCI bus mastering stays off
+until rings are programmed and is cleared before their release. Startup now
+aborts on power/firmware/LLT failures, discovers PCI capability/interrupt offsets,
+and checks the BAR length and lock allocations. LLT writes poll completion and
+close the reserved-page list. Incorrect MULTI_FUNC_CTRL/HWSEQ_CTRL offsets are
+corrected to 0x68/0x423.
+
+`make test-hardware` tests the production header with AddressSanitizer and
+UndefinedBehaviorSanitizer: raw byte offsets, hardware-style next-link traversal,
+queue selectors, RX layout and DMA address boundary checks. It does not run the
+IOKit lifecycle or validate physical hardware. The legacy simulation remains
+separate and still cannot establish hardware safety.
+
+## Remaining release blockers
+
+- No captured panic/backtrace proves the exact login freeze. No live hardware
+  test has been attempted, and no fix here should be called hardware-verified.
+- User-client calls, network output, scan RX polling and interrupt RX processing
+  are not serialized on a common command gate; stopping the device may race
+  clients/output. The scan spins for 13 x 40 ms in IODelay and directly competes
+  with the interrupt consumer. These paths need redesign and lifecycle tests.
+- Power sequencing, LLT buffer-boundary setup, PHY/RF calibration, firmware
+  startup, PCI DMA mapping through IODMACommand/IOMMU, sleep/wake and full hardware
+  DMA-quiescence remain to be validated. Clearing bus mastering is necessary;
+  a short delay alone is not proof that all outstanding transactions drained.
+- WPA2 has synthetic nonces and other incomplete protocol handling. The project
+  is not ready for normal network use even if booting becomes stable.
+- Historical bundled apps/DMGs and EFI copies contain old binaries. Rebuilding
+  source does not update the user's installed kext or the published release.
