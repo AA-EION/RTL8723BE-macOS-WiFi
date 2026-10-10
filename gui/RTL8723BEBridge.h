@@ -82,7 +82,11 @@ static inline int rtl_copy_bsd_name(char *out, size_t outLen) {
 
 /* 1 if the RTL8723BE PCI function is present in the IORegistry. */
 static inline int rtl_hardware_present(void) {
-    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching("pci10ec,b723"));
+    /* Same match as the kext personality; ACPI often renames the device (e.g. PXSX). */
+    CFMutableDictionaryRef match = IOServiceMatching("IOPCIDevice");
+    if (!match) return 0;
+    CFDictionarySetValue(match, CFSTR("IOPCIMatch"), CFSTR("0xb72310ec"));
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, match);
     if (service == IO_OBJECT_NULL) return 0;
     IOObjectRelease(service);
     return 1;

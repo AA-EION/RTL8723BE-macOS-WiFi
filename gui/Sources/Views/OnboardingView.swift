@@ -65,7 +65,13 @@ struct OnboardingView: View {
                     .controlSize(.large)
                 }
 
-                if let last = model.logs.last, last.level != .info {
+                if let reason = blockedReason {
+                    Label(reason, systemImage: "info.circle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 560)
+                } else if let last = model.logs.last, last.level != .info {
                     Text(last.message)
                         .font(.callout)
                         .foregroundStyle(.orange)
@@ -76,6 +82,18 @@ struct OnboardingView: View {
             .padding(Design.Spacing.large)
             .frame(maxWidth: .infinity)
         }
+    }
+
+    /// Why "Load Driver…" is disabled, so the button never greys out silently.
+    private var blockedReason: String? {
+        if !model.hardwarePresent {
+            return "No RTL8723BE card was found, so there is nothing to load the driver for."
+        }
+        if !model.bootArgPresent {
+            return "This Mac was started without rtl8723be_experimental=1 in boot-args, so the driver "
+                + "would refuse to start. Restart using an OpenCore EFI whose boot-args include it."
+        }
+        return nil
     }
 
     private func step(_ n: Int, done: Bool, title: String, detail: String) -> some View {
