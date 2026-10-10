@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #ifndef _RTL8723BE_IPC_H_
 #define _RTL8723BE_IPC_H_
 
@@ -58,8 +61,12 @@ struct RTL8723BEDiag {
     uint32_t uc_replay, uc_mic_fail, bc_delivered, bc_mic_fail;
     uint32_t last_uc_fc_pn_lo; // FC(16) | PN[15:0] of the last unicast-to-us frame
     uint32_t last_uc_rate_len; // rxmcs(8) << 16 | len
+    // v3: payload byte counters (Ethernet frames delivered to / accepted from the stack).
+    // macOS 26 does not fold IONetworkInterface input stats into if_data, so apps use these.
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
 };
-#define RTL8723BE_DIAG_VERSION 2
+#define RTL8723BE_DIAG_VERSION 3
 
 enum RTL8723BEWifiState {
     kRTLStateDisconnected   = 0,

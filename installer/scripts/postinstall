@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
 # Install permissions for the kext and ask macOS to load it. On first install (or after
 # an update) macOS asks for approval in System Settings > Privacy & Security, then a restart.
 KEXT=/Library/Extensions/RTL8723BEWiFi.kext

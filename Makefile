@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
+
 SDK_PATH := $(shell xcrun --sdk macosx --show-sdk-path)
 CXX := clang++
 CC := clang

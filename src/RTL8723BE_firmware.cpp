@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-rtlwifi-firmware
+// Firmware image: Copyright (c) 2010 Realtek Semiconductor Corporation (linux-firmware).
+
 #include "RTL8723BE_firmware.hpp"
 
 const uint8_t rtl8723befw_bin[] = {

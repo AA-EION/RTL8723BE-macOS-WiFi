@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
 # Removes the RTL8723BE driver and app. Run: sudo ./uninstall.sh
 set -u
 if [[ "${EUID}" -ne 0 ]]; then echo "Run with sudo." >&2; exit 2; fi

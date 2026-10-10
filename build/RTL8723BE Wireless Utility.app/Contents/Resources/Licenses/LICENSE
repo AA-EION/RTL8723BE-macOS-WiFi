@@ -1,0 +1,33 @@
+RTL8723BE Wi-Fi — licensing overview
+Copyright (c) 2026 Issen Software Group
+
+This project is licensed as openly as its origins allow. Every source file
+carries an SPDX-License-Identifier line naming its licence.
+
+1. MIT  (LICENSES/MIT.txt)
+   Everything written for this project that is not derived from Linux:
+     - the app (gui/), the command-line tool (tools/)
+     - the user-space/kernel interface (src/RTL8723BE_ipc.h), the IOUserClient
+       (src/RTL8723BEUserClient.*), the WPA2/CCMP crypto (src/RTL8723BE_crypto.*)
+       and the kext module stub (src/RTL8723BE_kmod.c)
+     - installer, build and helper scripts, tests and documentation
+   You may reuse these under the MIT terms, including in closed-source work.
+
+2. GPL-2.0-only  (LICENSES/GPL-2.0-only.txt)
+   The hardware support of the kernel extension is ported from the Linux kernel
+   driver drivers/net/wireless/realtek/rtlwifi/rtl8723be (and rtlwifi/efuse.c,
+   rtl8723com), which is GPL-2.0, Copyright (c) 2009-2014 Realtek Corporation.
+   Those files therefore stay GPL-2.0-only:
+     - src/RTL8723BE.cpp, src/RTL8723BE.hpp, src/RTL8723BE_hw.hpp,
+       src/RTL8723BE_tables.cpp, src/RTL8723BE_tables.hpp
+   and so does the compiled kernel extension RTL8723BEWiFi.kext as a whole.
+   Its complete corresponding source is this repository:
+   https://github.com/AA-EION/RTL8723BE-macOS-WiFi
+
+3. Realtek firmware licence  (LICENSES/LicenseRef-rtlwifi-firmware.txt)
+   src/rtl8723befw_36.bin and the firmware images embedded in
+   src/RTL8723BE_firmware.cpp / src/RTL8723BE_firmware36.cpp are Realtek
+   firmware from linux-firmware, redistributed unmodified under Realtek's terms.
+
+The app talks to the kernel extension only through the IOKit user-client
+interface; the two are separate programs. Third-party notices: NOTICE.md.

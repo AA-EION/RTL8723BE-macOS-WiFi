@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
+
 CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -I. -Imock
 

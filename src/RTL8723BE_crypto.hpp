@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #ifndef _RTL8723BE_CRYPTO_HPP_
 #define _RTL8723BE_CRYPTO_HPP_
 

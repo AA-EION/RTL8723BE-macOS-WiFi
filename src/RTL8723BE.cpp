@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Issen Software Group
+// Ported from Linux drivers/net/wireless/realtek/rtlwifi (rtl8723be, rtl8723com, efuse.c),
+// Copyright (c) 2009-2014 Realtek Corporation (licensed GPL-2.0).
+
 #include "RTL8723BE.hpp"
 #include <string.h>
 #include <sys/random.h>
@@ -247,6 +252,7 @@ bool RTL8723BE::init(OSDictionary *properties) {
     memset(fRxCrc, 0, sizeof(fRxCrc));
     fUcDataRx = fUcDelivered = fUcReplay = fUcMicFail = fBcDelivered = fBcMicFail = 0;
     fLastUcFcPn = fLastUcRateLen = 0;
+    fRxBytes = fTxBytes = 0;
     fCurRxRate = 0;
     fLastHmeBox = 0;
 
@@ -2300,6 +2306,7 @@ IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, voi
         d->uc_replay = me->fUcReplay; d->uc_mic_fail = me->fUcMicFail;
         d->bc_delivered = me->fBcDelivered; d->bc_mic_fail = me->fBcMicFail;
         d->last_uc_fc_pn_lo = me->fLastUcFcPn; d->last_uc_rate_len = me->fLastUcRateLen;
+        d->rx_bytes = me->fRxBytes; d->tx_bytes = me->fTxBytes;
         d->efuse_used = me->fCalib.efuse_used;
         d->efuse_autoload_ok = me->fCalib.autoload_ok ? 1 : 0;
         d->package_type = me->fCalib.package_type;
@@ -2530,6 +2537,7 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
         fNetif->inputPacket(m, (UInt32)ethLen);
         if (fNetStats) fNetStats->inputPackets++;
         if (isMulticast) fBcDelivered++; else fUcDelivered++;
+        fRxBytes += ethLen;
     } else if (m) {
         freePacket(m);
     }
@@ -2914,5 +2922,6 @@ UInt32 RTL8723BE::outputPacket(mbuf_t m, void *param) {
         return kIOReturnOutputDropped;
     }
     if (fNetStats) fNetStats->outputPackets++;
+    fTxBytes += pktLen;
     return kIOReturnOutputSuccess;
 }

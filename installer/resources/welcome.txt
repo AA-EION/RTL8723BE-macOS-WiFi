@@ -5,6 +5,9 @@ This installs:
   • RTL8723BEWiFi.kext (driver)             → /Library/Extensions
   • rtl8723be_cli (command-line tool)        → /usr/local/bin
 
+Made by Issen Software Group. App and tools: MIT. Kernel driver: GPL-2.0-only
+(ported from Linux). Source: https://github.com/AA-EION/RTL8723BE-macOS-WiFi
+
 Supported hardware: Realtek RTL8723BE PCIe Wi-Fi (PCI ID 10ec:b723), 2.4 GHz, WPA2-PSK.
 Tested on an HP laptop (subsystem 103c:804c) with macOS 26 (Darwin 25) under OpenCore.
 

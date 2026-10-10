@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
 """Prepare a boot for manual post-login testing, without enabling EFI injection."""
 import argparse
 import copy

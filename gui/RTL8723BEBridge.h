@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #ifndef _RTL8723BE_BRIDGE_H_
 #define _RTL8723BE_BRIDGE_H_
 
@@ -55,6 +58,34 @@ static inline int rtl_set_antenna(io_connect_t conn, uint8_t ant) {
     uint64_t scalar = (uint64_t)ant;
     kern_return_t kr = IOConnectCallScalarMethod(conn, kMethodSetAntenna, &scalar, 1, NULL, NULL);
     return (kr == KERN_SUCCESS) ? 0 : (int)kr;
+}
+
+static inline int rtl_get_diag(io_connect_t conn, struct RTL8723BEDiag *outDiag) {
+    size_t outSize = sizeof(struct RTL8723BEDiag);
+    kern_return_t kr = IOConnectCallStructMethod(conn, kMethodGetDiag, NULL, 0, outDiag, &outSize);
+    return (kr == KERN_SUCCESS) ? 0 : (int)kr;
+}
+
+/* Copies the BSD name (e.g. "en2") of the driver's network interface. */
+static inline int rtl_copy_bsd_name(char *out, size_t outLen) {
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("RTL8723BE"));
+    if (service == IO_OBJECT_NULL) return -1;
+    CFTypeRef name = IORegistryEntrySearchCFProperty(service, kIOServicePlane, CFSTR("BSD Name"),
+                                                     kCFAllocatorDefault, kIORegistryIterateRecursively);
+    IOObjectRelease(service);
+    if (!name) return -2;
+    Boolean ok = CFGetTypeID(name) == CFStringGetTypeID() &&
+                 CFStringGetCString((CFStringRef)name, out, (CFIndex)outLen, kCFStringEncodingUTF8);
+    CFRelease(name);
+    return ok ? 0 : -3;
+}
+
+/* 1 if the RTL8723BE PCI function is present in the IORegistry. */
+static inline int rtl_hardware_present(void) {
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching("pci10ec,b723"));
+    if (service == IO_OBJECT_NULL) return 0;
+    IOObjectRelease(service);
+    return 1;
 }
 
 #endif // _RTL8723BE_BRIDGE_H_

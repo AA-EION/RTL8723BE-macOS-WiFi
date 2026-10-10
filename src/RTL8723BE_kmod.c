@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #include <mach/mach_types.h>
 #include <libkern/libkern.h>
 

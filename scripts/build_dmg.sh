@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,10 +24,10 @@ cp "${PROJECT_DIR}/gui/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.i
 
 # 4. Compile Swift GUI binary
 echo "[*] Compiling Swift/AppKit GUI binary..."
-swiftc -O -parse-as-library -target x86_64-apple-macosx13.0 \
+swiftc -O -parse-as-library -swift-version 5 -target x86_64-apple-macosx14.0 \
     -import-objc-header "${PROJECT_DIR}/gui/RTL8723BEBridge.h" \
-    -framework Cocoa -framework SwiftUI -framework IOKit \
-    "${PROJECT_DIR}/gui/RTL8723BEApp.swift" \
+    -framework AppKit -framework SwiftUI -framework IOKit -framework ServiceManagement \
+    "${PROJECT_DIR}"/gui/Sources/*.swift "${PROJECT_DIR}"/gui/Sources/Views/*.swift \
     -o "${APP_BUNDLE}/Contents/MacOS/RTL8723BEWirelessUtility"
 
 # 5. Populate Bundle Resources (Info.plist, RTL8723BEWiFi.kext, rtl8723be_cli, stage_opencore.sh)
@@ -34,7 +36,8 @@ cp -R "${PROJECT_DIR}/build/RTL8723BEWiFi.kext" "${APP_BUNDLE}/Contents/Resource
 cp "${PROJECT_DIR}/tools/rtl8723be_cli" "${APP_BUNDLE}/Contents/Resources/rtl8723be_cli"
 cp "${PROJECT_DIR}/scripts/load_test_kext.sh" "${APP_BUNDLE}/Contents/Resources/load_test_kext.sh"
 cp "${PROJECT_DIR}/docs/TESTING.md" "${APP_BUNDLE}/Contents/Resources/Testing Guide.txt"
-cp "${PROJECT_DIR}/LICENCE.rtlwifi_firmware.txt" "${APP_BUNDLE}/Contents/Resources/LICENCE.rtlwifi_firmware.txt"
+mkdir -p "${APP_BUNDLE}/Contents/Resources/Licenses"
+cp "${PROJECT_DIR}/LICENSE" "${PROJECT_DIR}/NOTICE.md" "${PROJECT_DIR}/LICENSES/"*.txt "${APP_BUNDLE}/Contents/Resources/Licenses/"
 
 # 6. Ad-hoc sign the .app bundle
 codesign --force --deep --sign - "${APP_BUNDLE}"
@@ -63,7 +66,9 @@ pkgbuild --root "${PKG_ROOT}" --component-plist "${PKG_WORK}/component.plist" \
     --scripts "${PROJECT_DIR}/installer/scripts" \
     --identifier com.rtl8723be.macos.wifi.pkg --version "${VERSION}" --install-location / \
     "${PKG_WORK}/RTL8723BE-component.pkg"
-cp "${PROJECT_DIR}/installer/resources/"*.txt "${PROJECT_DIR}/LICENCE.rtlwifi_firmware.txt" "${PKG_WORK}/resources/"
+cp "${PROJECT_DIR}/installer/resources/"*.txt "${PKG_WORK}/resources/"
+{ cat "${PROJECT_DIR}/LICENSE"; printf '\n\n'; cat "${PROJECT_DIR}/NOTICE.md"; printf '\n\n'; \
+  cat "${PROJECT_DIR}/LICENSES/LicenseRef-rtlwifi-firmware.txt"; } > "${PKG_WORK}/resources/License.txt"
 sed "s/__VERSION__/${VERSION}/" "${PROJECT_DIR}/installer/Distribution.xml" > "${PKG_WORK}/Distribution.xml"
 PKG_OUT="${PKG_WORK}/RTL8723BE WiFi ${VERSION}.pkg"
 productbuild --distribution "${PKG_WORK}/Distribution.xml" --resources "${PKG_WORK}/resources" \
@@ -77,7 +82,8 @@ mkdir -p "${DMG_ROOT}"
 cp "${PKG_OUT}" "${DMG_ROOT}/Install RTL8723BE WiFi.pkg"
 cp "${PROJECT_DIR}/scripts/uninstall.sh" "${DMG_ROOT}/uninstall.sh"
 cp "${PROJECT_DIR}/installer/resources/welcome.txt" "${DMG_ROOT}/Read Me.txt"
-cp "${PROJECT_DIR}/LICENCE.rtlwifi_firmware.txt" "${DMG_ROOT}/LICENCE.rtlwifi_firmware.txt"
+mkdir -p "${DMG_ROOT}/Licenses"
+cp "${PROJECT_DIR}/LICENSE" "${PROJECT_DIR}/NOTICE.md" "${PROJECT_DIR}/LICENSES/"*.txt "${DMG_ROOT}/Licenses/"
 
 mkdir -p "${PROJECT_DIR}/dist"
 rm -f "${DMG_OUT}"

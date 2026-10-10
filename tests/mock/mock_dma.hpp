@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #pragma once
 
 #include "mock_pci_mmio.hpp"

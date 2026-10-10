@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #include "RTL8723BE_crypto.hpp"
 #include <cassert>
 #include <cstdio>

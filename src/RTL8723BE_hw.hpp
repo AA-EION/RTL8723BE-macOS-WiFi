@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Issen Software Group
+// Ported from Linux drivers/net/wireless/realtek/rtlwifi (rtl8723be, rtl8723com, efuse.c),
+// Copyright (c) 2009-2014 Realtek Corporation (licensed GPL-2.0).
+
 #ifndef _RTL8723BE_HW_HPP_
 #define _RTL8723BE_HW_HPP_
 

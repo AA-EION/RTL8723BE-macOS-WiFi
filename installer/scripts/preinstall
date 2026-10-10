@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
 # Stop the running driver (if any) so the new version can be loaded.
 /usr/bin/killall RTL8723BEWirelessUtility rtl8723be_cli 2>/dev/null || true
 if /usr/bin/kmutil showloaded 2>/dev/null | /usr/bin/grep -q com.rtl8723be.macos.wifi; then

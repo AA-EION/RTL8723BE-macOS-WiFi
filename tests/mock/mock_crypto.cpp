@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #include "mock_crypto.hpp"
 #include <cstring>
 #include <algorithm>

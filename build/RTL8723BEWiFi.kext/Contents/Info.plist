@@ -38,6 +38,8 @@
 			<string>RTL8723BEUserClient</string>
 		</dict>
 	</dict>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Issen Software Group. GPL-2.0-only (ported from Linux rtlwifi).</string>
 	<key>OSBundleLibraries</key>
 	<dict>
 		<key>com.apple.iokit.IONetworkingFamily</key>

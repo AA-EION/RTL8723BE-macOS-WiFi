@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Issen Software Group
+
 #include "simulated_device.hpp"
 #include <cstring>
 #include <algorithm>
