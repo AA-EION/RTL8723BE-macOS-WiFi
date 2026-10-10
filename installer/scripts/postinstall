@@ -1,0 +1,10 @@
+#!/bin/bash
+# Install permissions for the kext and ask macOS to load it. On first install (or after
+# an update) macOS asks for approval in System Settings > Privacy & Security, then a restart.
+KEXT=/Library/Extensions/RTL8723BEWiFi.kext
+/usr/sbin/chown -R root:wheel "$KEXT"
+/bin/chmod -R 755 "$KEXT"
+/usr/bin/xattr -dr com.apple.quarantine "$KEXT" 2>/dev/null || true
+/usr/bin/xattr -dr com.apple.quarantine "/Applications/RTL8723BE Wireless Utility.app" 2>/dev/null || true
+/usr/bin/kmutil load -p "$KEXT" 2>&1 | /usr/bin/logger -t rtl8723be-installer || true
+exit 0

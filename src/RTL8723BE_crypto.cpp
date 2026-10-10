@@ -721,4 +721,47 @@ uint32_t crc32_80211(const uint8_t* data, size_t len) {
     return ~crc;
 }
 
+
+static bool isQosData(const uint8_t* hdr) {
+    return ((hdr[0] >> 2) & 0x3) == 2 && (hdr[0] & 0x80) != 0;
+}
+
+size_t ccmp_build_aad(const uint8_t* hdr, size_t hdr_len, uint8_t aad[30]) {
+    if (!hdr || hdr_len < 24) return 0;
+    const bool qos = isQosData(hdr);
+    const bool a4 = (hdr[1] & 0x03) == 0x03;
+    const size_t need = 24 + (a4 ? 6 : 0) + (qos ? 2 : 0);
+    if (hdr_len < need) return 0;
+
+    size_t n = 0;
+    // FC: clear subtype bits 4-6 for data, Retry/PwrMgt/MoreData, set Protected;
+    // Order is masked for QoS data (HT control is not covered).
+    aad[n++] = (uint8_t)(hdr[0] & 0x8F);
+    aad[n++] = (uint8_t)(((hdr[1] & ~(0x08 | 0x10 | 0x20)) | 0x40) & (qos ? 0x7F : 0xFF));
+    for (size_t i = 4; i < 22; ++i) aad[n++] = hdr[i]; // A1, A2, A3
+    aad[n++] = (uint8_t)(hdr[22] & 0x0F);                // fragment number only
+    aad[n++] = 0x00;
+    size_t off = 24;
+    if (a4) {
+        for (size_t i = 0; i < 6; ++i) aad[n++] = hdr[off + i];
+        off += 6;
+    }
+    if (qos) {
+        aad[n++] = (uint8_t)(hdr[off] & 0x0F);           // TID only
+        aad[n++] = 0x00;
+    }
+    return n;
+}
+
+void ccmp_build_nonce(const uint8_t* hdr, size_t hdr_len, uint64_t pn, uint8_t nonce[13]) {
+    uint8_t prio = 0;
+    if (hdr_len >= 26 && isQosData(hdr)) {
+        size_t off = ((hdr[1] & 0x03) == 0x03) ? 30 : 24;
+        if (hdr_len > off) prio = hdr[off] & 0x0F;
+    }
+    nonce[0] = prio;
+    for (int i = 0; i < 6; ++i) nonce[1 + i] = hdr[10 + i];
+    for (int i = 0; i < 6; ++i) nonce[7 + i] = (uint8_t)((pn >> ((5 - i) * 8)) & 0xFF);
+}
+
 } // namespace rtl_crypto

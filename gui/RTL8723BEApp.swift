@@ -143,7 +143,6 @@ final class WiFiDriverModel: ObservableObject {
             var conn: io_connect_t = 0
             if rtl_open_client(&conn) == 0 {
                 _ = rtl_trigger_scan(conn)
-                Thread.sleep(forTimeInterval: 1.6)
                 var raw = RTL8723BEScanResults()
                 if rtl_get_scan_results(conn, &raw) == 0 {
                     var parsed: [DiscoveredNetwork] = []

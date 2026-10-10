@@ -8,13 +8,17 @@
 		<data>
 		+zHsB6LC9y0LXmj/qFT+umGrnfg=
 		</data>
+		<key>Resources/LICENCE.rtlwifi_firmware.txt</key>
+		<data>
+		zOTrpXP6VcbH8ZonR5HKe0JXVnc=
+		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/Info.plist</key>
 		<data>
-		eWJUr867D35V53ISOm3QZ28l9Ug=
+		TM1Ziaja4+cyO4/cCLtAubjNJgU=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<data>
-		jbi/IgelmYpL/zceqC0VagmVAXA=
+		ISQoolSXv2WuR6rNK2jqWheKmc8=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
 		<data>
@@ -26,11 +30,11 @@
 		</data>
 		<key>Resources/load_test_kext.sh</key>
 		<data>
-		60mIDLPbM+xCRSryN0H3hfb+Gjw=
+		WLX0qdct3Y6cPuDM+safDtqsJxg=
 		</data>
 		<key>Resources/rtl8723be_cli</key>
 		<data>
-		VS4whzmqXMCj9yVYWJ6VjRIDWd4=
+		mKgdes6GKc93AfLjP4a5QVriUBQ=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -42,18 +46,25 @@
 			BIj6oYZgnp+6sIAYrV3wF8BDiyrm4YZfP0fRFzoS7Lc=
 			</data>
 		</dict>
+		<key>Resources/LICENCE.rtlwifi_firmware.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			phNRZltPJk9sYxNk+FuQfY+PQfizaVM+9AIXZfnzti4=
+			</data>
+		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/Info.plist</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			2hTNWRwewYp/PTocl3WbU9fW+KXH3yVfium+NM3Pe88=
+			rJ0IhDmg2CKT3tNW7Hzo5b5yGZcBM7tARF3tyjeHfEk=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			xHxb7XpU04n+k23OCljdq7okYZsXL9Sk1/x+ojrOTyc=
+			/JK6JB7WlGJJoR3kKAdRouAVseXKmJQEDf2iLMCriVs=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
@@ -74,14 +85,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			epHk3/VceSbZ3+So7z4YKCPB5d+pxbCvJMmMBdkdWvQ=
+			UmLi1HxxYLYI0oMFbN4IuDg/qRDiDCzbhhicKdnsy+4=
 			</data>
 		</dict>
 		<key>Resources/rtl8723be_cli</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			aR9kGMBWtHqNAlv0EoqbbE6C8eGJbqr2fCbnl5JYaGc=
+			e2QPYWwPuUbkrL0pJ+/tdZd8J+WH88wiSl0jmDfE+34=
 			</data>
 		</dict>
 	</dict>

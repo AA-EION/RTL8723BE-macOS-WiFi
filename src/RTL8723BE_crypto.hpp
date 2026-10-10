@@ -72,6 +72,14 @@ bool ccmp_decrypt(const uint8_t key[16],
                   const uint8_t mic[8],
                   uint8_t* plaintext);
 
+// Build the CCMP AAD for a data MPDU header (IEEE 802.11-2012 11.4.3.3.2):
+// masked FC || A1 || A2 || A3 || masked SC || [A4] || [masked QC]. The Duration
+// field is NOT part of the AAD. Returns the AAD length (22..30), 0 on bad input.
+size_t ccmp_build_aad(const uint8_t* hdr, size_t hdr_len, uint8_t aad[30]);
+
+// Build the 13-byte CCMP nonce: priority (TID) || A2 || PN5..PN0.
+void ccmp_build_nonce(const uint8_t* hdr, size_t hdr_len, uint64_t pn, uint8_t nonce[13]);
+
 // CRC32 (IEEE 802.11 FCS)
 uint32_t crc32_80211(const uint8_t* data, size_t len);
 

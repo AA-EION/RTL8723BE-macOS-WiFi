@@ -27,6 +27,7 @@ KEXT_OBJS     := build/RTL8723BE.o \
                  build/RTL8723BEUserClient.o \
                  build/RTL8723BE_crypto.o \
                  build/RTL8723BE_firmware.o \
+                 build/RTL8723BE_firmware36.o \
                  build/RTL8723BE_tables.o \
                  build/RTL8723BE_kmod.o
 

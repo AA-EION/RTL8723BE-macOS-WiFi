@@ -25,16 +25,24 @@ if [[ "${LOADED}" == *com.rtl8723be.macos.wifi* ]]; then
     /usr/bin/killall RTL8723BEWirelessUtility rtl8723be_cli 2>/dev/null || true
     sleep 1
     /sbin/kextunload -b com.rtl8723be.macos.wifi || {
-        echo "Could not hot-unload active kext; please reboot once to load v1.0.3." >&2
+        echo "Could not hot-unload active kext; please reboot once, then load v1.3.0." >&2
         exit 2
     }
 fi
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${KEXT_SOURCE}/Contents/Info.plist")"
-if [[ "${VERSION}" != '1.0.3' ]]; then
-    echo "Expected RX/RF/LED-fix build 1.0.3, got ${VERSION}. Refusing older build." >&2
+if [[ "${VERSION}" != '1.3.0' ]]; then
+    echo "Expected Linux-parity init build 1.3.0, got ${VERSION}. Refusing older build." >&2
     exit 2
 fi
 /usr/bin/codesign --verify --strict "${KEXT_SOURCE}"
+INSTALLED=/Library/Extensions/RTL8723BEWiFi.kext
+if [[ -d "${INSTALLED}" ]]; then
+    # Installed by the .pkg: load that copy so macOS tracks a single approved path.
+    echo "Loading installed driver: ${INSTALLED}"
+    /usr/bin/kmutil load -p "${INSTALLED}"
+    echo "Load request returned. Check driver status and kernel logs."
+    exit 0
+fi
 TEST_DIR="$(/usr/bin/mktemp -d /private/tmp/rtl8723be-test.XXXXXX)"
 /usr/bin/ditto "${KEXT_SOURCE}" "${TEST_DIR}/RTL8723BEWiFi.kext"
 /usr/sbin/chown -R root:wheel "${TEST_DIR}/RTL8723BEWiFi.kext"

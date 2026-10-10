@@ -74,9 +74,7 @@ static int cmdScan(io_connect_t conn) {
         fprintf(stderr, "[!] kMethodScan failed (0x%08x)\n", kr);
         return 1;
     }
-    // Wait for channel dwell scan (13 channels * ~100ms)
-    usleep(1600 * 1000);
-
+    // The driver returns once every channel has been dwelt on (~1.6 s per antenna path).
     RTL8723BEScanResults res;
     memset(&res, 0, sizeof(res));
     size_t outSize = sizeof(res);
@@ -116,6 +114,23 @@ static int cmdConnect(io_connect_t conn, const char *ssid, const char *passphras
         if (sscanf(bssidOpt, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
             for (int i = 0; i < 6; ++i) params.bssid[i] = (uint8_t)b[i];
         }
+    } else {
+        // Pick the strongest BSS advertising this SSID from the last scan.
+        RTL8723BEScanResults res;
+        memset(&res, 0, sizeof(res));
+        size_t outSize = sizeof(res);
+        IOConnectCallStructMethod(conn, kMethodGetScanResults, nullptr, 0, &res, &outSize);
+        int best = -1;
+        for (uint32_t i = 0; i < res.count && i < RTL8723BE_MAX_SCAN_APS; ++i) {
+            if (strcmp(res.aps[i].ssid, ssid) == 0 && (best < 0 || res.aps[i].rssi > res.aps[best].rssi)) {
+                best = (int)i;
+            }
+        }
+        if (best < 0) {
+            fprintf(stderr, "[!] '%s' not in the last scan results; run 'scan' first or pass a BSSID.\n", ssid);
+            return 1;
+        }
+        memcpy(params.bssid, res.aps[best].bssid, 6);
     }
     printf("[*] Connecting to SSID '%s' via WPA2-PSK / 802.11 state machine...\n", params.ssid);
     kern_return_t kr = IOConnectCallStructMethod(conn, kMethodConnect, &params, sizeof(params), nullptr, nullptr);
@@ -152,6 +167,109 @@ static int cmdAntenna(io_connect_t conn, uint64_t ant) {
     return 0;
 }
 
+static bool callRead(io_connect_t conn, uint32_t sel, const uint64_t *in, uint32_t inCnt, uint64_t *out) {
+    uint32_t outCnt = 1;
+    kern_return_t kr = IOConnectCallScalarMethod(conn, sel, in, inCnt, out, &outCnt);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "[!] method %u failed (0x%08x)%s\n", sel, kr,
+                kr == (kern_return_t)0xe00002c1 ? " - run with sudo" : "");
+        return false;
+    }
+    return true;
+}
+
+static int cmdReg(io_connect_t conn, int argc, char **argv) {
+    // reg read <addr> [1|2|4] | reg write <addr> <value> [1|2|4]
+    if (argc < 4) { fprintf(stderr, "Usage: reg read <addr> [width] | reg write <addr> <value> [width]\n"); return 1; }
+    uint64_t addr = strtoull(argv[3], nullptr, 0);
+    if (strcmp(argv[2], "read") == 0) {
+        uint64_t in[2] = {addr, argc >= 5 ? strtoull(argv[4], nullptr, 0) : 4}, out = 0;
+        if (!callRead(conn, kMethodReadReg, in, 2, &out)) return 1;
+        printf("0x%04llx = 0x%0*llx\n", addr, (int)(in[1] * 2), out);
+        return 0;
+    }
+    if (strcmp(argv[2], "write") == 0 && argc >= 5) {
+        uint64_t in[3] = {addr, argc >= 6 ? strtoull(argv[5], nullptr, 0) : 4, strtoull(argv[4], nullptr, 0)};
+        kern_return_t kr = IOConnectCallScalarMethod(conn, kMethodWriteReg, in, 3, nullptr, nullptr);
+        if (kr != KERN_SUCCESS) { fprintf(stderr, "[!] write failed (0x%08x); writes need sudo\n", kr); return 1; }
+        printf("0x%04llx <- 0x%llx\n", addr, in[2]);
+        return 0;
+    }
+    fprintf(stderr, "Usage: reg read <addr> [width] | reg write <addr> <value> [width]\n");
+    return 1;
+}
+
+static int cmdRF(io_connect_t conn, int argc, char **argv) {
+    if (argc < 4) { fprintf(stderr, "Usage: rf read <off> | rf write <off> <value>\n"); return 1; }
+    uint64_t off = strtoull(argv[3], nullptr, 0);
+    if (strcmp(argv[2], "read") == 0) {
+        uint64_t out = 0;
+        if (!callRead(conn, kMethodReadRF, &off, 1, &out)) return 1;
+        printf("RF[0x%02llx] = 0x%05llx\n", off, out);
+        return 0;
+    }
+    if (strcmp(argv[2], "write") == 0 && argc >= 5) {
+        uint64_t in[2] = {off, strtoull(argv[4], nullptr, 0)};
+        kern_return_t kr = IOConnectCallScalarMethod(conn, kMethodWriteRF, in, 2, nullptr, nullptr);
+        if (kr != KERN_SUCCESS) { fprintf(stderr, "[!] write failed (0x%08x); writes need sudo\n", kr); return 1; }
+        printf("RF[0x%02llx] <- 0x%05llx\n", off, in[1]);
+        return 0;
+    }
+    fprintf(stderr, "Usage: rf read <off> | rf write <off> <value>\n");
+    return 1;
+}
+
+static int cmdDump(io_connect_t conn, int argc, char **argv) {
+    uint64_t start = argc >= 3 ? strtoull(argv[2], nullptr, 0) : 0;
+    uint64_t len = argc >= 4 ? strtoull(argv[3], nullptr, 0) : 0x100;
+    start &= ~0xFULL;
+    for (uint64_t a = start; a < start + len && a < 0x4000; a += 16) {
+        printf("%04llx:", a);
+        for (uint64_t w = 0; w < 16; w += 4) {
+            uint64_t in[2] = {a + w, 4}, out = 0;
+            if (!callRead(conn, kMethodReadReg, in, 2, &out)) return 1;
+            printf(" %08llx", out);
+        }
+        printf("\n");
+    }
+    return 0;
+}
+
+static int cmdDiag(io_connect_t conn) {
+    RTL8723BEDiag d;
+    memset(&d, 0, sizeof(d));
+    size_t outSize = sizeof(d);
+    kern_return_t kr = IOConnectCallStructMethod(conn, kMethodGetDiag, nullptr, 0, &d, &outSize);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "[!] kMethodGetDiag failed (0x%08x) - is the loaded kext older than this CLI?\n", kr);
+        return 1;
+    }
+    printf("=== RTL8723BE diagnostics (v%u) ===\n", d.version);
+    printf("  init stage     : %u%s\n", d.init_stage, d.init_stage == 11 ? " (ready)" : "");
+    printf("  firmware       : v%u.%u  MCUFWDL=0x%08x\n", d.fw_version >> 16, d.fw_version & 0xFFFF, d.mcufwdl);
+    printf("  eFuse          : %s, %u bytes used, package %u, SVID/SMID %04x/%04x\n",
+           d.efuse_autoload_ok ? "valid" : "INVALID", d.efuse_used, d.package_type, d.svid, d.smid);
+    printf("  CR=0x%04x RCR=0x%08x HIMR=0x%08x HISR=0x%08x RXDMA=0x%04x\n", d.cr, d.rcr, d.himr, d.hisr, d.rxdma_ctrl);
+    printf("  RF18=0x%05x (ch %u) RF00=0x%05x\n", d.rf_chnlbw, d.rf_chnlbw & 0xFF, d.rf_mode);
+    printf("  antenna        : %u-ant, Wi-Fi on %s | 948=0x%x 92c=0x%x 4c=0x%08x 765=0x%02x 76e=0x%02x 67=0x%02x\n",
+           d.ant_num, d.ant_path == 2 ? "AUX/S0" : "MAIN/S1", d.reg_948, d.reg_92c, d.reg_4c, d.reg_765, d.reg_76e, d.reg_67);
+    printf("  BB CCA hits    : OFDM %u  CCK %u\n", d.bb_ofdm_cca, d.bb_cck_cca);
+    printf("  interrupts     : %u\n", d.interrupts);
+    printf("  RX             : desc %u, mgmt %u (beacons %u), data %u, ctrl %u, crc-err %u, dropped %u\n",
+           d.rx_desc_done, d.rx_mgmt, d.rx_beacons, d.rx_data, d.rx_ctrl, d.rx_crc_err, d.rx_dropped);
+    printf("  TX             : submitted %u, ring-full %u\n", d.tx_submitted, d.tx_ring_full);
+    if (d.version >= 2) {
+        printf("  RX by rate     : CCK ok %u crc %u | OFDM ok %u crc %u | HT ok %u crc %u\n",
+               d.rx_ok_cck, d.rx_crc_cck, d.rx_ok_ofdm, d.rx_crc_ofdm, d.rx_ok_ht, d.rx_crc_ht);
+        printf("  unicast data   : rx %u, delivered %u, replay %u, mic-fail %u | bcast delivered %u, mic-fail %u\n",
+               d.uc_data_rx, d.uc_delivered, d.uc_replay, d.uc_mic_fail, d.bc_delivered, d.bc_mic_fail);
+        printf("  last unicast   : FC %02x%02x PN..%04x rate 0x%02x len %u\n",
+               d.last_uc_fc_pn_lo >> 24, (d.last_uc_fc_pn_lo >> 16) & 0xFF, d.last_uc_fc_pn_lo & 0xFFFF,
+               d.last_uc_rate_len >> 16, d.last_uc_rate_len & 0xFFFF);
+    }
+    return 0;
+}
+
 static void printUsage(const char *prog) {
     printf("Usage: %s <command> [args]\n\n", prog);
     printf("Commands:\n");
@@ -159,7 +277,14 @@ static void printUsage(const char *prog) {
     printf("  scan                             Trigger 2.4 GHz scan (Ch 1-13) and list discovered APs\n");
     printf("  connect <SSID> [PSK] [BSSID]     Authenticate, associate, and run WPA2 4-way handshake\n");
     printf("  disconnect                       Deauthenticate and tear down active association\n");
-    printf("  antenna <1|2>                    Select RF antenna diversity path (1=Main, 2=Aux — HP laptop fix)\n");
+    printf("  antenna <1|2>                    Select Wi-Fi RF path (1=Main/S1, 2=Aux/S0 — HP single-antenna fix)\n");
+    printf("  diag                             Driver/hardware diagnostics (init stage, RX counters, key registers)\n");
+    printf("  reg read <addr> [1|2|4]          Read a MAC/BB register\n");
+    printf("  reg write <addr> <val> [1|2|4]   Write a MAC/BB register (sudo)\n");
+    printf("  rf read <off>                    Read an RF register (path A)\n");
+    printf("  rf write <off> <val>             Write an RF register (sudo)\n");
+    printf("  dump [start] [len]               Hex dump of MAC/BB register space\n");
+    printf("  iqk                              Run TX/RX IQ calibration on both RF paths (sudo)\n");
 }
 
 int main(int argc, char **argv) {
@@ -190,6 +315,25 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "antenna") == 0) {
         uint64_t ant = (argc >= 3) ? (uint64_t)atoi(argv[2]) : 0;
         rc = cmdAntenna(conn, ant);
+    } else if (strcmp(argv[1], "iqk") == 0) {
+        uint64_t out = 0;
+        uint32_t outCnt = 1;
+        kern_return_t kr = IOConnectCallScalarMethod(conn, kMethodIQCalibrate, nullptr, 0, &out, &outCnt);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "[!] IQ calibration failed (0x%08x); needs sudo and a v1.2+ kext\n", kr);
+            rc = 1;
+        } else {
+            printf("[+] IQ calibration: path A (S1) %s, path B (S0) %s\n",
+                   (out & 1) ? "calibrated" : "FAILED", (out & 2) ? "calibrated" : "FAILED");
+        }
+    } else if (strcmp(argv[1], "diag") == 0) {
+        rc = cmdDiag(conn);
+    } else if (strcmp(argv[1], "reg") == 0) {
+        rc = cmdReg(conn, argc, argv);
+    } else if (strcmp(argv[1], "rf") == 0) {
+        rc = cmdRF(conn, argc, argv);
+    } else if (strcmp(argv[1], "dump") == 0) {
+        rc = cmdDump(conn, argc, argv);
     } else {
         printUsage(argv[0]);
         rc = 1;

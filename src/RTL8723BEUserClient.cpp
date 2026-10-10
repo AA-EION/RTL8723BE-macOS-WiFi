@@ -35,6 +35,36 @@ const IOExternalMethodDispatch RTL8723BEUserClient::sMethods[kNumberOfMethods] =
         (IOExternalMethodAction)&RTL8723BEUserClient::sSetAntenna,
         1, 0, // 1 scalar input (antenna: 1 or 2)
         0, 0
+    },
+    { // kMethodReadReg
+        (IOExternalMethodAction)&RTL8723BEUserClient::sReadReg,
+        2, 0,
+        1, 0
+    },
+    { // kMethodWriteReg
+        (IOExternalMethodAction)&RTL8723BEUserClient::sWriteReg,
+        3, 0,
+        0, 0
+    },
+    { // kMethodReadRF
+        (IOExternalMethodAction)&RTL8723BEUserClient::sReadRF,
+        1, 0,
+        1, 0
+    },
+    { // kMethodWriteRF
+        (IOExternalMethodAction)&RTL8723BEUserClient::sWriteRF,
+        2, 0,
+        0, 0
+    },
+    { // kMethodGetDiag
+        (IOExternalMethodAction)&RTL8723BEUserClient::sGetDiag,
+        0, 0,
+        0, sizeof(RTL8723BEDiag)
+    },
+    { // kMethodIQCalibrate
+        (IOExternalMethodAction)&RTL8723BEUserClient::sIQCalibrate,
+        0, 0,
+        1, 0
     }
 };
 
@@ -44,6 +74,8 @@ bool RTL8723BEUserClient::initWithTask(task_t owningTask, void *securityToken, U
     }
     fTask = owningTask;
     fOwner = nullptr;
+    // Register/RF writes can wedge the radio; only allow them for root clients.
+    fIsAdmin = clientHasPrivilege(securityToken, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
     return true;
 }
 
@@ -133,4 +165,57 @@ IOReturn RTL8723BEUserClient::sSetAntenna(OSObject *target, void *reference, IOE
     }
     uint8_t ant = (uint8_t)args->scalarInput[0];
     return me->fOwner->setAntennaPath(ant);
+}
+
+IOReturn RTL8723BEUserClient::sReadReg(OSObject *target, void *reference, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    uint32_t value = 0;
+    IOReturn ret = me->fOwner->debugReadReg((uint32_t)args->scalarInput[0],
+                                            (uint32_t)args->scalarInput[1], &value);
+    args->scalarOutput[0] = value;
+    return ret;
+}
+
+IOReturn RTL8723BEUserClient::sWriteReg(OSObject *target, void *reference, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    if (!me->fIsAdmin) return kIOReturnNotPrivileged;
+    return me->fOwner->debugWriteReg((uint32_t)args->scalarInput[0], (uint32_t)args->scalarInput[1],
+                                     (uint32_t)args->scalarInput[2]);
+}
+
+IOReturn RTL8723BEUserClient::sReadRF(OSObject *target, void *reference, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    uint32_t value = 0;
+    IOReturn ret = me->fOwner->debugReadRF((uint32_t)args->scalarInput[0], &value);
+    args->scalarOutput[0] = value;
+    return ret;
+}
+
+IOReturn RTL8723BEUserClient::sWriteRF(OSObject *target, void *reference, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    if (!me->fIsAdmin) return kIOReturnNotPrivileged;
+    return me->fOwner->debugWriteRF((uint32_t)args->scalarInput[0], (uint32_t)args->scalarInput[1]);
+}
+
+IOReturn RTL8723BEUserClient::sGetDiag(OSObject *target, void *reference, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    if (!args || !args->structureOutput || args->structureOutputSize < sizeof(RTL8723BEDiag)) {
+        return kIOReturnBadArgument;
+    }
+    return me->fOwner->getDiag((RTL8723BEDiag *)args->structureOutput);
+}
+
+IOReturn RTL8723BEUserClient::sIQCalibrate(OSObject *target, void *reference, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    if (!me->fIsAdmin) return kIOReturnNotPrivileged;
+    uint32_t mask = 0;
+    IOReturn ret = me->fOwner->runIQK(&mask);
+    args->scalarOutput[0] = mask;
+    return ret;
 }

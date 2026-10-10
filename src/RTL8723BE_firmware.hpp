@@ -7,4 +7,8 @@
 extern const uint8_t rtl8723befw_bin[];
 extern const size_t rtl8723befw_bin_len;
 
+// Firmware v36 (linux-firmware rtlwifi/rtl8723befw_36.bin), the version Linux loads by default.
+extern const uint8_t rtl8723befw36_bin[];
+extern const size_t rtl8723befw36_bin_len;
+
 #endif // _RTL8723BE_FIRMWARE_HPP_

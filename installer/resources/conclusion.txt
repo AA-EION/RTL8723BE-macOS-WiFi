@@ -1,0 +1,12 @@
+Almost done.
+
+1. Open System Settings → Privacy & Security and click "Allow" for the
+   RTL8723BE driver if macOS asks, then restart.
+2. After restarting, open "RTL8723BE Wireless Utility", click Scan, choose your
+   network and enter its password — or in Terminal:
+
+       rtl8723be_cli scan
+       rtl8723be_cli connect "Network Name" 'password'
+
+The connection appears in macOS as a wired network port (en*), not in the Wi-Fi
+menu. To remove everything later, run uninstall.sh from the disk image with sudo.

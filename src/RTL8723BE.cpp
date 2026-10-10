@@ -1,27 +1,156 @@
 #include "RTL8723BE.hpp"
 #include <string.h>
+#include <sys/random.h>
 #include <pexpert/pexpert.h>
 
 #define super IOEthernetController
 OSDefineMetaClassAndStructors(RTL8723BE, IOEthernetController);
 
-// Return only prepared, contiguous buffers whose entire DMA range fits 32 bits.
-static IOBufferMemoryDescriptor *allocateDMA(size_t size, size_t alignment) {
-    IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+// Hardware-init stages reported through the diagnostics interface and kext log.
+enum {
+    kStageNone = 0,
+    kStageMapped,
+    kStageEfuse,
+    kStageRings,
+    kStagePowerOn,
+    kStageMac,
+    kStageFirmware,
+    kStageMacTable,
+    kStageBB,
+    kStageRF,
+    kStageConfigured,
+    kStageReady
+};
+
+// Gated operations dispatched through gatedCall().
+enum {
+    kOpScanResults = 1,
+    kOpConnect,
+    kOpDisconnect,
+    kOpStatus,
+    kOpAntenna,
+    kOpReadReg,
+    kOpWriteReg,
+    kOpReadRF,
+    kOpWriteRF,
+    kOpDiag,
+    kOpIQK
+};
+
+static inline uint32_t bitShift(uint32_t mask) {
+    return mask ? (uint32_t)__builtin_ctz(mask) : 0;
+}
+
+static void rtlDelayMs(uint32_t ms) {
+    // All callers run in thread context (start(), gated user-client calls).
+    IOSleep(ms);
+}
+
+// ============================================================================
+// Linux rtl8723be power sequences (pwrseq.h), rows that apply to PCIe only.
+// ============================================================================
+
+enum { kPwrWrite = 1, kPwrPoll = 2, kPwrDelay = 3 };
+
+// RTL8723B_TRANS_CARDDIS_TO_CARDEMU + RTL8723B_TRANS_CARDEMU_TO_ACT
+static const RTLPwrCmd kCardEnableFlow[] = {
+    {0x0005, kPwrWrite, 0x88, 0x00},  // clear SUS_EN / APDM_EN
+    {0x0005, kPwrWrite, 0x18, 0x00},  // 0x04[12:11] = 0, disable WL suspend
+    {0x0301, kPwrWrite, 0xFF, 0x00},  // PCIe DMA start
+    {0x0005, kPwrWrite, 0x1C, 0x00},  // disable SW LPS and WLSUS_EN
+    {0x0075, kPwrWrite, 0x01, 0x01},  // disable USB suspend
+    {0x0006, kPwrPoll,  0x02, 0x02},  // wait 0x04[17] power ready
+    {0x0075, kPwrWrite, 0x01, 0x00},  // enable USB suspend
+    {0x0006, kPwrWrite, 0x01, 0x01},  // release WLON reset
+    {0x0005, kPwrWrite, 0x80, 0x00},  // disable HWPDN
+    {0x0005, kPwrWrite, 0x18, 0x00},  // disable WL suspend
+    {0x0005, kPwrWrite, 0x01, 0x01},  // APFM_ONMAC
+    {0x0005, kPwrPoll,  0x01, 0x00},  // wait for MAC power-on state machine
+    {0x0010, kPwrWrite, 0x40, 0x40},  // WL controls XTAL setting
+    {0x0049, kPwrWrite, 0x02, 0x02},  // falling edge interrupt
+    {0x0063, kPwrWrite, 0x02, 0x02},  // GPIO9 interrupt mode
+    {0x0062, kPwrWrite, 0x02, 0x00},  // GPIO9 input mode
+    {0x0058, kPwrWrite, 0x01, 0x01},  // HSISR GPIO[C:0] interrupt
+    {0x005A, kPwrWrite, 0x02, 0x02},  // HSISR GPIO9 interrupt
+    {0x0068, kPwrWrite, 0x08, 0x08},  // GPIO9 pull-high (test chip row, harmless)
+    {0x0069, kPwrWrite, 0x40, 0x40},  // GPIO9 pull-high
+};
+
+// RTL8723B_TRANS_ACT_TO_LPS
+static const RTLPwrCmd kLpsEnterFlow[] = {
+    {0x0301, kPwrWrite, 0xFF, 0xFF},  // PCIe DMA stop
+    {0x0522, kPwrWrite, 0xFF, 0xFF},  // TX pause
+    {0x05F8, kPwrPoll,  0xFF, 0x00},
+    {0x05F9, kPwrPoll,  0xFF, 0x00},
+    {0x05FA, kPwrPoll,  0xFF, 0x00},
+    {0x05FB, kPwrPoll,  0xFF, 0x00},
+    {0x0002, kPwrWrite, 0x01, 0x00},  // CCK/OFDM off
+    {0x0002, kPwrDelay, 0x00, 0x00},
+    {0x0002, kPwrWrite, 0x02, 0x00},  // BB reset
+    {0x0100, kPwrWrite, 0xFF, 0x03},  // reset MAC TRX
+    {0x0101, kPwrWrite, 0x02, 0x00},
+    {0x0553, kPwrWrite, 0x20, 0x20},
+};
+
+// RTL8723B_TRANS_ACT_TO_CARDEMU + RTL8723B_TRANS_CARDEMU_TO_PDN
+static const RTLPwrCmd kCardDisableFlow[] = {
+    {0x001F, kPwrWrite, 0xFF, 0x00},  // RF off
+    {0x004F, kPwrWrite, 0x01, 0x00},
+    {0x0049, kPwrWrite, 0x02, 0x00},
+    {0x0005, kPwrWrite, 0x02, 0x02},  // turn off MAC by HW state machine
+    {0x0005, kPwrPoll,  0x02, 0x00},
+    {0x0010, kPwrWrite, 0x40, 0x00},  // BT controls XTAL
+    {0x0006, kPwrWrite, 0x01, 0x00},
+    {0x0005, kPwrWrite, 0x80, 0x80},
+};
+
+// ============================================================================
+// DMA buffers
+// ============================================================================
+
+bool RTL8723BE::allocDMA(RTLDmaBuf &buf, size_t size, size_t alignment) {
+    memset(&buf, 0, sizeof(buf));
+    buf.mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
         kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
         size, 0xFFFFFFFFULL & ~(uint64_t(alignment) - 1));
-    if (!mem) return nullptr;
-    if (mem->prepare(kIODirectionInOut) != kIOReturnSuccess) {
-        mem->release();
-        return nullptr;
+    if (!buf.mem) return false;
+
+    buf.cmd = IODMACommand::withSpecification(kIODMACommandOutputHost64, 32, size,
+                                              IODMACommand::kMapped, size, (UInt32)alignment);
+    if (!buf.cmd || buf.cmd->setMemoryDescriptor(buf.mem, true) != kIOReturnSuccess) {
+        freeDMA(buf);
+        return false;
     }
-    if (!mem->getBytesNoCopy() ||
-        !rtlDmaRangeValid(mem->getPhysicalAddress(), size, alignment)) {
-        mem->complete(kIODirectionInOut);
-        mem->release();
-        return nullptr;
+
+    IODMACommand::Segment64 seg;
+    UInt32 numSeg = 1;
+    UInt64 offset = 0;
+    if (buf.cmd->gen64IOVMSegments(&offset, &seg, &numSeg) != kIOReturnSuccess ||
+        numSeg != 1 || seg.fLength < size ||
+        !rtlDmaRangeValid(seg.fIOVMAddr, size, alignment)) {
+        freeDMA(buf);
+        return false;
     }
-    return mem;
+    buf.ioaddr = seg.fIOVMAddr;
+    buf.virt = buf.mem->getBytesNoCopy();
+    buf.size = size;
+    if (!buf.virt) {
+        freeDMA(buf);
+        return false;
+    }
+    memset(buf.virt, 0, size);
+    return true;
+}
+
+void RTL8723BE::freeDMA(RTLDmaBuf &buf) {
+    if (buf.cmd) {
+        buf.cmd->clearMemoryDescriptor();
+        buf.cmd->release();
+    }
+    if (buf.mem) {
+        buf.mem->release();
+    }
+    memset(&buf, 0, sizeof(buf));
 }
 
 // ============================================================================
@@ -37,43 +166,53 @@ bool RTL8723BE::init(OSDictionary *properties) {
     fMMIOMap = nullptr;
     fMMIOBase = nullptr;
     fWorkLoop = nullptr;
+    fCommandGate = nullptr;
     fInterruptSource = nullptr;
     fScanTimer = nullptr;
     fNetif = nullptr;
     fMediumDict = nullptr;
     fRFLock = nullptr;
-    fStateLock = nullptr;
+    fTxLock = nullptr;
 
     fPowerState = POWER_CARDDIS;
     fHIMRMask = 0;
     fInterruptEnabled = false;
+    fHwReady = false;
+    fFwReady = false;
     memset(&fCalib, 0, sizeof(fCalib));
+    fInitStage = kStageNone;
+    fRFChnlVal = 0;
+    fFwVersion = 0;
+    fFwSubVersion = 0;
+    fCutVersion = 0;
     fCurrentChannel = 1;
-    fActiveAntenna = 2; // Default to Aux port 2 for HP 103C:804C
+    fAntNum = 2;
+    fActiveAntenna = 1;
+    fAntennaForced = false;
+    fOemHP = false;
 
     for (int i = 0; i < 8; ++i) {
-        fTxRingDescMem[i] = nullptr;
+        memset(&fTxRing[i], 0, sizeof(fTxRing[i]));
         fTxRingDescVirt[i] = nullptr;
-        fTxRingDescPhys[i] = 0;
         fTxHostIdx[i] = 0;
         for (int j = 0; j < RTL8723BE_TX_DESC_COUNT; ++j) {
-            fTxBufMem[i][j] = nullptr;
+            memset(&fTxBuf[i][j], 0, sizeof(fTxBuf[i][j]));
         }
     }
-
-    fRxRingDescMem = nullptr;
+    memset(&fRxRing, 0, sizeof(fRxRing));
     fRxRingDescVirt = nullptr;
-    fRxRingDescPhys = 0;
     fRxHostIdx = 0;
     for (int j = 0; j < RTL8723BE_RX_DESC_COUNT; ++j) {
-        fRxBufMem[j] = nullptr;
+        memset(&fRxBuf[j], 0, sizeof(fRxBuf[j]));
     }
 
     fState = kRTLStateDisconnected;
     memset(fMyMAC, 0, 6);
     memset(fConnectedBSSID, 0, 6);
     memset(fConnectedSSID, 0, sizeof(fConnectedSSID));
-    memset(fPassphrase, 0, sizeof(fPassphrase));
+    fTxSeq = 0;
+    fAid = 0;
+    fNetStats = nullptr;
 
     memset(fPMK, 0, sizeof(fPMK));
     memset(fPTK, 0, sizeof(fPTK));
@@ -89,6 +228,10 @@ bool RTL8723BE::init(OSDictionary *properties) {
 
     memset(&fScanResults, 0, sizeof(fScanResults));
     fScanActive = false;
+    fScanRetriedOtherAntenna = false;
+    fAntennaCalibrated = false;
+    fPassMgmtStart = 0;
+    fPass1Score = 0;
     fScanCurrentChannel = 1;
     fHomeChannel = 1;
 
@@ -96,18 +239,24 @@ bool RTL8723BE::init(OSDictionary *properties) {
     fRxPackets = 0;
     fTxErrors = 0;
     fRxErrors = 0;
+    fIntCount = 0;
+    fRxDescDone = 0;
+    fRxMgmt = fRxBeacons = fRxData = fRxCtrl = fRxDropped = 0;
+    fTxRingFull = 0;
+    memset(fRxOk, 0, sizeof(fRxOk));
+    memset(fRxCrc, 0, sizeof(fRxCrc));
+    fUcDataRx = fUcDelivered = fUcReplay = fUcMicFail = fBcDelivered = fBcMicFail = 0;
+    fLastUcFcPn = fLastUcRateLen = 0;
+    fCurRxRate = 0;
+    fLastHmeBox = 0;
 
     return true;
 }
 
 void RTL8723BE::cleanupResources() {
-    fInterruptEnabled = false;
-    fHIMRMask = 0;
-
-    if (fMMIOBase) {
-        mmio_write32(REG_HIMR, 0);
-        mmio_write32(REG_HIMRE, 0);
-        mmio_write32(REG_HISR, 0xFFFFFFFFU);
+    fScanActive = false;
+    if (fCommandGate) {
+        fCommandGate->commandWakeup(&fScanActive);
     }
 
     if (fScanTimer) {
@@ -117,6 +266,7 @@ void RTL8723BE::cleanupResources() {
         fScanTimer = nullptr;
     }
 
+    disableInterrupts();
     if (fInterruptSource) {
         fInterruptSource->disable();
         if (fWorkLoop) fWorkLoop->removeEventSource(fInterruptSource);
@@ -124,8 +274,8 @@ void RTL8723BE::cleanupResources() {
         fInterruptSource = nullptr;
     }
 
-    if (fMMIOBase) {
-        powerOff();
+    if (fMMIOBase && fInitStage >= kStagePowerOn) {
+        hwDisable();
     }
     if (fPCIDevice) {
         // Disabling MAC alone does not revoke PCI DMA access to host memory.
@@ -135,14 +285,24 @@ void RTL8723BE::cleanupResources() {
     }
     freeDMARings();
 
+    fNetStats = nullptr;
     if (fNetif) {
+        // attachInterface() hands back a retained object; without this release the
+        // interface keeps the controller alive and the kext can never unload.
         detachInterface(fNetif);
+        fNetif->release();
         fNetif = nullptr;
     }
 
     if (fMediumDict) {
         fMediumDict->release();
         fMediumDict = nullptr;
+    }
+
+    if (fCommandGate) {
+        if (fWorkLoop) fWorkLoop->removeEventSource(fCommandGate);
+        fCommandGate->release();
+        fCommandGate = nullptr;
     }
 
     if (fWorkLoop) {
@@ -165,11 +325,12 @@ void RTL8723BE::cleanupResources() {
         IOLockFree(fRFLock);
         fRFLock = nullptr;
     }
-
-    if (fStateLock) {
-        IOLockFree(fStateLock);
-        fStateLock = nullptr;
+    if (fTxLock) {
+        IOLockFree(fTxLock);
+        fTxLock = nullptr;
     }
+    fHwReady = false;
+    fInitStage = kStageNone;
 }
 
 bool RTL8723BE::start(IOService *provider) {
@@ -190,14 +351,14 @@ bool RTL8723BE::start(IOService *provider) {
         super::stop(provider);
         return false;
     }
-
     fPCIDevice->retain();
+
     // Revoke DMA inherited from firmware/an earlier boot before touching BARs.
     fPCIDevice->setBusMasterEnable(false);
 
-    // Discover capabilities; offsets are not guaranteed by PCI.
+    // Bring the function to D0 and keep ASPM off (Linux disables ASPM for hw_init).
     UInt8 pmCap = 0;
-    fPCIDevice->findPCICapability(0x01, &pmCap);
+    fPCIDevice->findPCICapability(kIOPCIPowerManagementCapability, &pmCap);
     if (pmCap) {
         uint16_t pmcsr = fPCIDevice->configRead16(pmCap + 4);
         if ((pmcsr & 3) != 0) {
@@ -206,7 +367,7 @@ bool RTL8723BE::start(IOService *provider) {
         }
     }
     UInt8 pcieCap = 0;
-    fPCIDevice->findPCICapability(0x10, &pcieCap);
+    fPCIDevice->findPCICapability(kIOPCIPCIExpressCapability, &pcieCap);
     if (pcieCap) {
         uint16_t linkCtrl = fPCIDevice->configRead16(pcieCap + 0x10);
         fPCIDevice->configWrite16(pcieCap + 0x10, linkCtrl & ~3U);
@@ -214,140 +375,107 @@ bool RTL8723BE::start(IOService *provider) {
 
     fPCIDevice->setIOEnable(true);
     fPCIDevice->setMemoryEnable(true);
-    IODelay(2000);
+    IOSleep(2);
 
-    // 3. Map BAR2 16KB 64-bit MMIO aperture (PCI Config Base Address 2 = offset 0x18)
+    // Map BAR2 (16 KB memory aperture; BAR0 is I/O space on this part).
     fMMIOMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
-    if (!fMMIOMap) {
+    if (!fMMIOMap || fMMIOMap->getLength() < 0x4000 || !fMMIOMap->getVirtualAddress()) {
         IOLog("RTL8723BE: Failed to map BAR2 MMIO region\n");
         cleanupResources();
         super::stop(provider);
         return false;
     }
-    if (fMMIOMap->getLength() < 0x4000 || !fMMIOMap->getVirtualAddress()) {
-        IOLog("RTL8723BE: Invalid BAR2 aperture\n");
+    fMMIOBase = (volatile uint8_t*)fMMIOMap->getVirtualAddress();
+    if (mmio_read32(REG_SYS_ISO_CTRL) == 0xFFFFFFFFU) {
+        IOLog("RTL8723BE: BAR2 reads 0xFFFFFFFF; device not responding\n");
         cleanupResources();
         super::stop(provider);
         return false;
     }
-    fMMIOBase = (volatile uint8_t*)fMMIOMap->getVirtualAddress();
-    IOLog("RTL8723BE: Mapped BAR2 MMIO at %p (length %lu)\n",
-          fMMIOBase, (unsigned long)fMMIOMap->getLength());
+    fInitStage = kStageMapped;
 
-    // 4. Immediately mask all hardware interrupts and clear sticky HISR bits before registering IRQ
-    fHIMRMask = 0;
-    fInterruptEnabled = false;
+    // Mask all interrupts and clear sticky status before anything else.
     mmio_write32(REG_HIMR, 0);
     mmio_write32(REG_HIMRE, 0);
     mmio_write32(REG_HISR, 0xFFFFFFFFU);
+    mmio_write32(REG_HISRE, 0xFFFFFFFFU);
 
     fRFLock = IOLockAlloc();
-    fStateLock = IOLockAlloc();
-    if (!fRFLock || !fStateLock) {
-        cleanupResources();
-        super::stop(provider);
-        return false;
-    }
-
+    fTxLock = IOLockAlloc();
     fWorkLoop = getWorkLoop();
-    if (!fWorkLoop) {
-        IOLog("RTL8723BE: Failed to acquire IOWorkLoop\n");
+    if (!fRFLock || !fTxLock || !fWorkLoop) {
         cleanupResources();
         super::stop(provider);
         return false;
     }
     fWorkLoop->retain();
 
-    // 5. Hardware Power-on Sequence + eFuse + Firmware + DMA Rings BEFORE enabling interrupts!
-    if (!powerOn()) {
-        IOLog("RTL8723BE: Power-on failed; aborting startup\n");
+    fCommandGate = IOCommandGate::commandGate(this);
+    if (!fCommandGate || fWorkLoop->addEventSource(fCommandGate) != kIOReturnSuccess) {
         cleanupResources();
         super::stop(provider);
         return false;
     }
 
-    if (!readEfuse(fCalib)) {
-        IOLog("RTL8723BE: eFuse read fallback to default MAC\n");
-    }
+    // A previous driver instance may have locked ISO/CLK/power registers (RSV_CTRL = 0x0E).
+    mmio_write8(REG_RSV_CTRL, 0x00);
+
+    // Chip cut version ([15:12] of SYS_CFG) is used by table conditions.
+    fCutVersion = (uint8_t)((mmio_read32(REG_SYS_CFG) >> 12) & 0x0F);
+
+    readEfuse(fCalib);
     memcpy(fMyMAC, fCalib.mac_addr, 6);
-    IOLog("RTL8723BE: Hardware MAC: %02x:%02x:%02x:%02x:%02x:%02x (xtal=0x%02x)\n",
-          fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5], fCalib.crystal_cap);
+    fInitStage = kStageEfuse;
+    IOLog("RTL8723BE: eFuse %s (used %u bytes) MAC %02x:%02x:%02x:%02x:%02x:%02x xtal=0x%02x "
+          "svid=%04x smid=%04x bt=0x%02x pkg=%u cut=%u\n",
+          fCalib.autoload_ok ? "OK" : "INVALID", fCalib.efuse_used,
+          fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5],
+          fCalib.crystal_cap, fCalib.svid, fCalib.smid, fCalib.bt_setting,
+          fCalib.package_type, fCutVersion);
 
-    // Program MAC address into REG_MACID (0x0610..0x0615)
-    for (int i = 0; i < 6; ++i) {
-        mmio_write8(0x0610U + (uint32_t)i, fMyMAC[i]);
+    // Antenna: eFuse 0xC3 (bit0 = two antennas, bit6 = single-antenna path is AUX),
+    // overridable like Linux's ant_sel module parameter: rtl8723be_ant_sel=1|2.
+    fAntNum = (fCalib.autoload_ok && (fCalib.bt_setting & 0x01) == 0) ? 1 : 2;
+    fActiveAntenna = (fAntNum == 1 && fCalib.autoload_ok && (fCalib.bt_setting & 0x40)) ? 2 : 1;
+    int antSel = 0;
+    if (PE_parse_boot_argn("rtl8723be_ant_sel", &antSel, sizeof(antSel)) && (antSel == 1 || antSel == 2)) {
+        fAntNum = (antSel == 1) ? 1 : 2;
+        fActiveAntenna = (antSel == 1) ? 2 : 1;
+        fAntennaForced = true;
     }
-
-    // IMPORTANT: downloadFirmware() uses 0x1000..0x1FFF (shared Packet Buffer SRAM) while MCUFWDL_EN=1,
-    // so downloadFirmware() MUST run BEFORE initLLT() and initDMARings()!
-    if (!downloadFirmware(rtl8723befw_bin, rtl8723befw_bin_len)) {
-        IOLog("RTL8723BE: Firmware download failed; aborting startup\n");
-        cleanupResources();
-        super::stop(provider);
-        return false;
-    } else {
-        IOLog("RTL8723BE: 8051 MCU firmware loaded and initialized successfully\n");
-    }
-
-    if (!initLLT()) {
-        IOLog("RTL8723BE: LLT/FIFO initialization failed\n");
-        cleanupResources();
-        super::stop(provider);
-        return false;
-    }
+    fOemHP = fCalib.autoload_ok && fCalib.customer_id == 0 && fCalib.did == 0x8176 &&
+             fCalib.svid == 0x103C && fCalib.smid == 0x1629;
 
     if (!initDMARings()) {
-        IOLog("RTL8723BE: DMA rings initialization failed\n");
+        IOLog("RTL8723BE: DMA ring allocation failed\n");
+        cleanupResources();
+        super::stop(provider);
+        return false;
+    }
+    fInitStage = kStageRings;
+
+    // Rings are valid; the NIC may now master the bus (Linux: pci_set_master before hw_init).
+    fPCIDevice->setBusMasterEnable(true);
+
+    if (!hwInit()) {
+        IOLog("RTL8723BE: Hardware initialization failed at stage %u; aborting\n", fInitStage);
         cleanupResources();
         super::stop(provider);
         return false;
     }
 
-    if (!initBasebandAndRF()) {
-        IOLog("RTL8723BE: Baseband/RF initialization failed\n");
-        cleanupResources();
-        super::stop(provider);
-        return false;
-    }
-
-    // Re-assert FIFO boundaries and RX filter after MAC/BB table loads:
-    // RCR_AMF (BIT 20 = 0x00100000) | RCR_ADF (BIT 18 = 0x00040000) | RCR_AB | RCR_AM | RCR_APM | RCR_AAP
-    mmio_write16(0x06A0, 0xFFFFU); // REG_RXFLTMAP0: accept all Management frames (Beacons & Probe Responses!)
-    mmio_write16(0x06A2, 0xFFFFU); // REG_RXFLTMAP1: accept Control frames
-    mmio_write16(0x06A4, 0xFFFFU); // REG_RXFLTMAP2: accept all Data frames
-    mmio_write32(REG_RCR, 0x00142A0FU);
-
-    // Turn ON HP Wireless LED (active-low LED0/LED1 at REG_LEDCFG2 0x004E, REG_LEDCFG1 0x004D, REG_LEDCFG0 0x004C)
-    mmio_write8(0x004E, (mmio_read8(0x004E) & 0x90U) | 0x20U);
-    mmio_write8(0x004D, mmio_read8(0x004D) & 0x10U);
-    mmio_write8(0x004C, mmio_read8(0x004C) & 0x70U);
-    IOLog("RTL8723BE: GPIO_PIN_CTRL(0x0044)=0x%08x LEDCFG2(0x004E)=0x%02x RCR(0x0608)=0x%08x\n",
-          mmio_read32(0x0044), mmio_read8(0x004E), mmio_read32(REG_RCR));
-
-    // Select a vector advertised as MSI, rather than assuming index 1 exists.
-    int irqIndex = 0;
+    fInterruptSource = nullptr;
     int irqType = 0;
     for (int index = 0; fPCIDevice->getInterruptType(index, &irqType) == kIOReturnSuccess; ++index) {
         if (irqType & kIOInterruptTypePCIMessaged) {
-            irqIndex = index;
-            break;
+            fInterruptSource = IOFilterInterruptEventSource::filterInterruptEventSource(
+                this, &RTL8723BE::interruptAction, &RTL8723BE::interruptFilter, fPCIDevice, index);
+            if (fInterruptSource) break;
         }
     }
-    fInterruptSource = IOFilterInterruptEventSource::filterInterruptEventSource(
-        this,
-        &RTL8723BE::interruptAction,
-        &RTL8723BE::interruptFilter,
-        fPCIDevice,
-        irqIndex
-    );
     if (!fInterruptSource) {
         fInterruptSource = IOFilterInterruptEventSource::filterInterruptEventSource(
-            this,
-            &RTL8723BE::interruptAction,
-            &RTL8723BE::interruptFilter,
-            fPCIDevice,
-            0
-        );
+            this, &RTL8723BE::interruptAction, &RTL8723BE::interruptFilter, fPCIDevice, 0);
     }
     if (!fInterruptSource || fWorkLoop->addEventSource(fInterruptSource) != kIOReturnSuccess) {
         IOLog("RTL8723BE: Failed to register interrupt event source\n");
@@ -355,9 +483,7 @@ bool RTL8723BE::start(IOService *provider) {
         super::stop(provider);
         return false;
     }
-    // Keep fInterruptSource disabled until enable(IONetworkInterface*) or scan/connect is called!
 
-    // 7. Create Scan Timer Event Source
     fScanTimer = IOTimerEventSource::timerEventSource(this, &RTL8723BE::scanTimerAction);
     if (!fScanTimer || fWorkLoop->addEventSource(fScanTimer) != kIOReturnSuccess) {
         cleanupResources();
@@ -365,14 +491,13 @@ bool RTL8723BE::start(IOService *provider) {
         return false;
     }
 
-    // 8. Publish Ethernet Mediums & Attach Network Interface
     fMediumDict = OSDictionary::withCapacity(1);
     if (!fMediumDict) {
         cleanupResources();
         super::stop(provider);
         return false;
     }
-    IONetworkMedium *medium = IONetworkMedium::medium(kIOMediumEthernetAuto, 100 * 1000000);
+    IONetworkMedium *medium = IONetworkMedium::medium(kIOMediumEthernetAuto, 54 * 1000000);
     if (medium) {
         IONetworkMedium::addMedium(fMediumDict, medium);
         publishMediumDictionary(fMediumDict);
@@ -380,24 +505,43 @@ bool RTL8723BE::start(IOService *provider) {
         medium->release();
     }
 
-    OSSynchronizeIO();
-    if (!attachInterface((IONetworkInterface**)&fNetif, true)) {
+    if (!attachInterface((IONetworkInterface**)&fNetif, false)) {
         IOLog("RTL8723BE: Failed to attach network interface\n");
         cleanupResources();
         super::stop(provider);
         return false;
     }
 
-    setAntennaPath(2); // Aux port 2 for HP
+    // Radio is up and receiving from here on; the stack only gates the data path.
+    fInterruptSource->enable();
+    enableInterrupts();
+    refreshLED(true);
 
+    setLinkStatus(kIONetworkLinkValid, nullptr);
+    fNetif->registerService();
     registerService();
-    IOLog("RTL8723BE: Driver v1.0.3 initialized and attached successfully\n");
+    IOLog("RTL8723BE: Driver v1.3.0 ready (fw v%u.%u, %u-ant, path %s%s, RCR=0x%08x, RF18=0x%05x)\n",
+          fFwVersion, fFwSubVersion, fAntNum, fActiveAntenna == 2 ? "AUX/S0" : "MAIN/S1",
+          fAntennaForced ? " forced" : "", mmio_read32(REG_RCR), fRFChnlVal);
     return true;
 }
 
 void RTL8723BE::stop(IOService *provider) {
+    // Serialize with any in-flight user-client call before tearing down event sources.
+    if (fCommandGate) {
+        fCommandGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this, &RTL8723BE::quiesce));
+    }
     cleanupResources();
     super::stop(provider);
+}
+
+IOReturn RTL8723BE::quiesce(void *, void *, void *, void *) {
+    fHwReady = false;
+    disableInterrupts();
+    if (fScanTimer) fScanTimer->cancelTimeout();
+    fScanActive = false;
+    fCommandGate->commandWakeup(&fScanActive);
+    return kIOReturnSuccess;
 }
 
 void RTL8723BE::free() {
@@ -409,38 +553,36 @@ void RTL8723BE::free() {
 // IOEthernetController Interface Implementation
 // ============================================================================
 
+// Serialize outputPacket() on the work loop (TX scratch buffers, CCMP PN, TX ring).
+IOOutputQueue *RTL8723BE::createOutputQueue() {
+    return IOGatedOutputQueue::withTarget(this, getWorkLoop(), 256);
+}
+
+bool RTL8723BE::configureInterface(IONetworkInterface *netif) {
+    if (!super::configureInterface(netif)) return false;
+    IONetworkData *data = netif->getParameter(kIONetworkStatsKey);
+    fNetStats = data ? (IONetworkStats *)data->getBuffer() : nullptr;
+    return true;
+}
+
 IOReturn RTL8723BE::enable(IONetworkInterface *netif) {
     (void)netif;
-    IOLog("RTL8723BE::enable()\n");
-    if (fPCIDevice) {
-        fPCIDevice->setBusMasterEnable(true);
+    if (!fHwReady) return kIOReturnNotReady;
+    if (IOOutputQueue *q = getOutputQueue()) {
+        q->setCapacity(256);
+        q->start();
     }
-    mmio_write16(REG_CR, 0x02FFU);
-    mmio_write16(0x06A0, 0xFFFFU);
-    mmio_write16(0x06A2, 0xFFFFU);
-    mmio_write16(0x06A4, 0xFFFFU);
-    mmio_write32(REG_RCR, 0x00142A0FU);
-    mmio_write8(0x004E, (mmio_read8(0x004E) & 0x90U) | 0x20U);
-    mmio_write32(REG_HISR, 0xFFFFFFFFU);
-    fHIMRMask = IMR_ROK | IMR_RDU | IMR_BEDOK | IMR_BKDOK |
-                IMR_MGNTDOK | IMR_HIGHDOK | IMR_VODOK | IMR_VIDOK;
-    fInterruptEnabled = true;
-    if (fInterruptSource) {
-        fInterruptSource->enable();
-    }
-    mmio_write32(REG_HIMR, fHIMRMask);
+    // Data path only; the radio stays up for scanning regardless of interface state.
+    setLinkStatus(fState == kRTLStateConnected ? (kIONetworkLinkValid | kIONetworkLinkActive)
+                                               : kIONetworkLinkValid, nullptr);
     return kIOReturnSuccess;
 }
 
 IOReturn RTL8723BE::disable(IONetworkInterface *netif) {
     (void)netif;
-    IOLog("RTL8723BE::disable()\n");
-    fInterruptEnabled = false;
-    fHIMRMask = 0;
-    mmio_write32(REG_HIMR, 0);
-    mmio_write32(REG_HIMRE, 0);
-    if (fInterruptSource) {
-        fInterruptSource->disable();
+    if (IOOutputQueue *q = getOutputQueue()) {
+        q->stop();
+        q->flush();
     }
     return kIOReturnSuccess;
 }
@@ -448,6 +590,22 @@ IOReturn RTL8723BE::disable(IONetworkInterface *netif) {
 IOReturn RTL8723BE::getHardwareAddress(IOEthernetAddress *addrP) {
     if (!addrP) return kIOReturnBadArgument;
     memcpy(addrP->bytes, fMyMAC, 6);
+    return kIOReturnSuccess;
+}
+
+IOReturn RTL8723BE::setPromiscuousMode(bool active) {
+    (void)active;
+    return kIOReturnSuccess;
+}
+
+IOReturn RTL8723BE::setMulticastMode(bool active) {
+    (void)active;
+    return kIOReturnSuccess;
+}
+
+IOReturn RTL8723BE::setMulticastList(IOEthernetAddress *addrs, UInt32 count) {
+    (void)addrs;
+    (void)count;
     return kIOReturnSuccess;
 }
 
@@ -509,1345 +667,2172 @@ void RTL8723BE::mmio_write32(uint32_t offset, uint32_t val) {
     OSSynchronizeIO();
 }
 
+uint32_t RTL8723BE::getBBReg(uint32_t addr, uint32_t mask) {
+    return (mmio_read32(addr) & mask) >> bitShift(mask);
+}
+
+void RTL8723BE::setBBReg(uint32_t addr, uint32_t mask, uint32_t data) {
+    if (mask != 0xFFFFFFFFU) {
+        uint32_t orig = mmio_read32(addr);
+        data = (orig & ~mask) | ((data << bitShift(mask)) & mask);
+    }
+    mmio_write32(addr, data);
+}
+
 // ============================================================================
-// 3-Wire LSSI Serial RF Interface (Offset 0x0840)
+// RF register access (Linux rtl8723_phy_rf_serial_read/write, path A)
 // ============================================================================
 
-void RTL8723BE::writeRFRegister(uint8_t offset, uint32_t data) {
+uint32_t RTL8723BE::getRFReg(uint8_t offset, uint32_t mask) {
     if (fRFLock) IOLockLock(fRFLock);
-    uint32_t val = (((uint32_t)offset << 20) | (data & 0x000FFFFF)) & 0x0FFFFFFF;
-    mmio_write32(REG_RFPGA0_XA_LSSI, val);
+    uint32_t hssi = mmio_read32(RFPGA0_XA_HSSIPARAMETER2);
+    uint32_t hssi2 = (hssi & ~BLSSIREADADDRESS) | ((uint32_t)offset << 23) | BLSSIREADEDGE;
+    mmio_write32(RFPGA0_XA_HSSIPARAMETER2, hssi & ~BLSSIREADEDGE);
+    mmio_write32(RFPGA0_XA_HSSIPARAMETER2, hssi2);
+    mmio_write32(RFPGA0_XA_HSSIPARAMETER2, hssi | BLSSIREADEDGE);
+    IODelay(120);
+    bool pi = (mmio_read32(RFPGA0_XA_HSSIPARAMETER1) & (1U << 8)) != 0;
+    uint32_t value = mmio_read32(pi ? TRANSCEIVEA_HSPI_READBACK : RFPGA0_XA_LSSIREADBACK) & BLSSIREADBACKDATA;
+    if (fRFLock) IOLockUnlock(fRFLock);
+    return (value & mask) >> bitShift(mask);
+}
+
+void RTL8723BE::setRFReg(uint8_t offset, uint32_t mask, uint32_t data) {
+    if (mask != 0xFFFFFU) {
+        uint32_t orig = getRFReg(offset, 0xFFFFF);
+        data = (orig & ~mask) | (data << bitShift(mask));
+    }
+    if (fRFLock) IOLockLock(fRFLock);
+    uint32_t dataAndAddr = (((uint32_t)offset << 20) | (data & 0x000FFFFFU)) & 0x0FFFFFFFU;
+    mmio_write32(REG_RFPGA0_XA_LSSI, dataAndAddr);
     IODelay(1);
     if (fRFLock) IOLockUnlock(fRFLock);
 }
 
-uint32_t RTL8723BE::readRFRegister(uint8_t offset) {
-    if (fRFLock) IOLockLock(fRFLock);
-    uint32_t val = ((uint32_t)offset << 20) & 0x0FF00000;
-    mmio_write32(REG_RFPGA0_XA_LSSI, val);
-    IODelay(10);
-    uint32_t data = mmio_read32(0x08B8) & 0x000FFFFF;
-    if (fRFLock) IOLockUnlock(fRFLock);
-    return data;
+// ============================================================================
+// Power sequencing
+// ============================================================================
+
+bool RTL8723BE::runPowerSequence(const RTLPwrCmd *seq, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        const RTLPwrCmd &c = seq[i];
+        switch (c.cmd) {
+        case kPwrWrite: {
+            uint8_t v = mmio_read8(c.offset);
+            mmio_write8(c.offset, (uint8_t)((v & ~c.mask) | (c.value & c.mask)));
+            break;
+        }
+        case kPwrPoll: {
+            bool ok = false;
+            for (int n = 0; n < 5000; ++n) {
+                if ((mmio_read8(c.offset) & c.mask) == (c.value & c.mask)) { ok = true; break; }
+                if (mmio_read32(0) == 0xFFFFFFFFU) break; // device fell off the bus
+                IODelay(10);
+            }
+            if (!ok) {
+                IOLog("RTL8723BE: pwrseq poll 0x%04x mask 0x%02x timed out (0x%02x)\n",
+                      c.offset, c.mask, mmio_read8(c.offset));
+                return false;
+            }
+            break;
+        }
+        case kPwrDelay:
+            IODelay(2);
+            break;
+        }
+    }
+    return true;
 }
 
-// ============================================================================
-// Hardware Power Sequence (CARDDIS -> CARDEMU -> ACT)
-// ============================================================================
-
 bool RTL8723BE::powerOn() {
-    // Verify BAR2 MMIO is responding and not returning 0xFFFFFFFF PCIe master-abort
-    uint32_t probe = mmio_read32(0x0000);
-    if (probe == 0xFFFFFFFFU) {
-        IOLog("RTL8723BE: Warning — BAR2 MMIO read 0xFFFFFFFF at offset 0x0000 (PCIe link in L1/D3)\n");
-        return false;
-    }
-
-    // 1. Power unlock: write 0x00 to REG_RSV_CTRL (0x001C)
     mmio_write8(REG_RSV_CTRL, 0x00);
-
-    // 2. RTL8723B_TRANS_CARDDIS_TO_CARDEMU & CARDEMU_TO_ACT (Linux pwrseq.h):
-    // Clear APD_FEN (BIT 7), SUS (BIT 3..4), and WL_HWPDN_SL (BIT 2) in REG_APS_FSMCO+1 (0x0005)
-    mmio_write8(REG_APS_FSMCO + 1, mmio_read8(REG_APS_FSMCO + 1) & ~0x9CU);
-
-    // 3. Start PCIe DMA clock: write 0x00 to 0x0301
-    mmio_write8(0x0301, 0x00);
-
-    // 4. Release analog isolation: clear bit 5 and bit 7 of REG_SYS_ISO_CTRL (0x0000)
-    mmio_write8(REG_SYS_ISO_CTRL, mmio_read8(REG_SYS_ISO_CTRL) & ~0xA0U);
-
-    // 5. Poll power stability (REG_PWR_STATUS 0x0006 bit 1 == 1)
-    int timeout = 50;
-    while (timeout-- > 0) {
-        if (mmio_read8(REG_PWR_STATUS) & 0x02U) break;
-        IODelay(100);
-    }
-    if (timeout < 0) {
-        IOLog("RTL8723BE: Power stability poll (0x0006 BIT1) timed out\n");
+    // Auto power down to chip-off state disabled (APS_FSMCO[15] = 0).
+    mmio_write8(REG_APS_FSMCO + 1, mmio_read8(REG_APS_FSMCO + 1) & ~0x80U);
+    if (!runPowerSequence(kCardEnableFlow, sizeof(kCardEnableFlow) / sizeof(kCardEnableFlow[0]))) {
         return false;
     }
-
-    // 6. Release WL_ISO (set BIT 0 in REG_PWR_STATUS 0x0006)
-    mmio_write8(REG_PWR_STATUS, mmio_read8(REG_PWR_STATUS) | 0x01U);
-
-    // 7. Trigger hardware power-on state machine: set APFM_ONMAC (BIT 0) in 0x0005 and wait until it clears
-    mmio_write8(REG_APS_FSMCO + 1, mmio_read8(REG_APS_FSMCO + 1) | 0x01U);
-    int fsm_wait = 100;
-    while (fsm_wait-- > 0) {
-        if ((mmio_read8(REG_APS_FSMCO + 1) & 0x01U) == 0) break;
-        IODelay(100);
-    }
-
-    // 8. Preserve FEN_PCIEA (BIT 6), FEN_PPLL (BIT 7), FEN_PCIED (BIT 8) in REG_SYS_FUNC_EN (0x0002)
-    // and SYS_CLK_EN in REG_SYS_CLKR (0x0008) using masked read-modify-write!
-    mmio_write16(REG_SYS_FUNC_EN, mmio_read16(REG_SYS_FUNC_EN) | 0x0DC3U);
-    mmio_write16(REG_SYS_CLKR, mmio_read16(REG_SYS_CLKR) | 0x0838U);
-
-    // 9. Core Activation
-    mmio_write8(REG_MULTI_FUNC_CTRL, mmio_read8(REG_MULTI_FUNC_CTRL) | 0x08U);
-    mmio_write8(REG_APS_FSMCO, mmio_read8(REG_APS_FSMCO) | 0x10U);
-    mmio_write8(REG_HWSEQ_CTRL, 0x7FU);
-    IODelay(200);
-
-    // Keep MAC TX/RX off until valid DMA rings are installed. PCI bus mastering
-    // remains disabled throughout initialization, including firmware/LLT work.
-    mmio_write16(REG_CR, 0x023FU);
-
     fPowerState = POWER_ACT;
     return true;
 }
 
-bool RTL8723BE::powerOff() {
-    if (fMMIOBase && mmio_read32(0x0000) != 0xFFFFFFFFU) {
-        mmio_write32(REG_HIMR, 0);
-        mmio_write32(REG_HIMRE, 0);
-        mmio_write16(REG_CR, 0x0000);
-        mmio_write8(REG_RSV_CTRL, 0x0E);
+// Linux _rtl8723be_poweroff_adapter()
+void RTL8723BE::powerOff() {
+    if (!fMMIOBase || mmio_read32(0) == 0xFFFFFFFFU) return;
+    (void)runPowerSequence(kLpsEnterFlow, sizeof(kLpsEnterFlow) / sizeof(kLpsEnterFlow[0]));
+    if ((mmio_read8(REG_MCUFWDL) & 0x80) && fFwReady) {
+        firmwareSelfReset();
     }
+    mmio_write8(REG_SYS_FUNC_EN + 1, mmio_read8(REG_SYS_FUNC_EN + 1) & ~0x04U); // reset MCU
+    mmio_write8(REG_MCUFWDL, 0x00);
+    (void)runPowerSequence(kCardDisableFlow, sizeof(kCardDisableFlow) / sizeof(kCardDisableFlow[0]));
+    mmio_write8(REG_RSV_CTRL + 1, mmio_read8(REG_RSV_CTRL + 1) & ~0x01U);
+    mmio_write8(REG_RSV_CTRL + 1, mmio_read8(REG_RSV_CTRL + 1) | 0x01U);
+    mmio_write8(REG_RSV_CTRL, 0x0E);
     fPowerState = POWER_CARDDIS;
+    fFwReady = false;
+}
+
+void RTL8723BE::hwDisable() {
+    disableInterrupts();
+    fHwReady = false;
     fState = kRTLStateDisconnected;
-    return true;
+    if (!fMMIOBase || mmio_read32(0) == 0xFFFFFFFFU) return;
+    mmio_write8(REG_MSR, 0x00);            // no link
+    refreshLED(false);
+    powerOff();
 }
 
 // ============================================================================
-// Internal Linked List Table (LLT) Initialization
+// MAC init (Linux _rtl8723be_init_mac / _rtl8723be_llt_table_init)
 // ============================================================================
 
 bool RTL8723BE::initLLT() {
-    if (!fMMIOBase || mmio_read32(0x0000) == 0xFFFFFFFFU) return false;
+    const uint32_t txpktbufBndy = 245;
+    const uint32_t maxPage = 255;
 
-    // Configure 128-byte TX/RX FIFO page size and queue-to-FIFO DMA mapping (Linux _rtl8723be_init_mac)
-    mmio_write8(0x0104, 0x11U);    // REG_PBP: 128B RX page [3:0]=1, 128B TX page [7:4]=1
-    mmio_write16(0x010C, 0xF771U); // REG_TRXDMA_CTRL: queue mapping
+    mmio_write32(REG_TRXFF_BNDY, 0x27FF0000U | txpktbufBndy);
+    mmio_write8(REG_TDECTRL + 1, (uint8_t)txpktbufBndy);
+    mmio_write8(REG_TXPKTBUF_BCNQ_BDNY, (uint8_t)txpktbufBndy);
+    mmio_write8(REG_TXPKTBUF_MGQ_BDNY, (uint8_t)txpktbufBndy);
+    mmio_write8(0x045D, (uint8_t)txpktbufBndy);
+    mmio_write8(REG_PBP, 0x31);
+    mmio_write8(REG_RX_DRVINFO_SZ, 0x4);
 
     auto writeLLT = [this](uint32_t address, uint32_t next) -> bool {
-        mmio_write32(REG_LLT_INIT, (1U << 30) | (address << 8) | next);
+        mmio_write32(REG_LLT_INIT, (1U << 30) | ((address & 0xFF) << 8) | (next & 0xFF));
         for (unsigned attempt = 0; attempt < 100; ++attempt) {
             uint32_t status = mmio_read32(REG_LLT_INIT);
             if (status == 0xFFFFFFFFU) return false;
-            if ((status >> 30) == 0) return true;
+            if (((status >> 30) & 0x3) == 0) return true;
             IODelay(2);
         }
         return false;
     };
-    for (uint32_t i = 0; i < 244; ++i) {
+    for (uint32_t i = 0; i < txpktbufBndy - 1; ++i) {
         if (!writeLLT(i, i + 1)) return false;
     }
-    if (!writeLLT(244, 0xFF)) return false;
-    for (uint32_t i = 245; i < 255; ++i) {
+    if (!writeLLT(txpktbufBndy - 1, 0xFF)) return false;
+    for (uint32_t i = txpktbufBndy; i < maxPage; ++i) {
         if (!writeLLT(i, i + 1)) return false;
     }
-    // The reserved pages form a circular list, unlike the terminated TX list.
-    if (!writeLLT(255, 245)) return false;
+    if (!writeLLT(maxPage, txpktbufBndy)) return false;
 
-    // Program TX/RX FIFO SRAM boundaries (RX_DMA_BOUNDARY_8723B = 0x27FF, TX_PAGE_BOUNDARY = 0xF5)
-    mmio_write16(0x0114, 0x00F5U); // REG_TRXFF_BNDY
-    mmio_write16(0x0116, 0x27FFU); // REG_TRXFF_BNDY + 2 (10KB - 1 RX FIFO limit)
-    mmio_write8(0x0209, 0xF5U);    // REG_TDECTRL + 1 (BCN page boundary)
-    mmio_write8(0x0424, 0xF5U);    // REG_TXPKTBUF_WMAC_LBK_BF_HD
-    mmio_write8(0x0425, 0xF5U);    // REG_MGQ_BDNY
-    mmio_write16(0x0214, 0x000CU); // REG_RQPN_NPQ (NPQ=12)
-    mmio_write32(0x0200, 0x80DA0C0CU); // REG_RQPN (HPQ=12, LPQ=12, PUBQ=218, LD_RQPN=BIT31)
-    mmio_write8(0x060F, 0x04U);    // REG_RX_DRVINFO_SZ (32 bytes)
-
+    mmio_write32(REG_RQPN, 0x80E40808U);
+    mmio_write8(REG_RQPN_NPQ, 0x00);
     return true;
 }
 
-// ============================================================================
-// eFuse & Factory Calibration Decoding
-// ============================================================================
-
-bool RTL8723BE::readEfuse(CalibData &outCalib) {
-    uint8_t phys_efuse[512];
-    memset(phys_efuse, 0xFF, sizeof(phys_efuse));
-
-    if (fMMIOBase && mmio_read32(0x0000) != 0xFFFFFFFFU) {
-        // Enable eFuse access
-        mmio_write8(REG_EFUSE_ACCESS, 0x69);
-
-        // Read physical eFuse PG stream (0x0000..0x01FF):
-        // Write addr in [17:8] with BIT(31)=0 (read trigger); hardware sets BIT(31)=1 when data [7:0] is ready!
-        for (uint16_t addr = 0; addr < 512; ++addr) {
-            uint32_t cmd = ((uint32_t)(addr & 0x3FFU) << 8);
-            mmio_write32(REG_EFUSE_CTRL, cmd);
-
-            int retry = 60;
-            while (retry-- > 0) {
-                uint32_t res = mmio_read32(REG_EFUSE_CTRL);
-                if (res == 0xFFFFFFFFU) break;
-                if ((res & 0x80000000U) != 0) {
-                    phys_efuse[addr] = (uint8_t)(res & 0xFFU);
-                    break;
-                }
-                IODelay(2);
-            }
-            if (addr > 4 && phys_efuse[addr] == 0xFF && phys_efuse[addr - 1] == 0xFF) {
-                break; // End of PG stream
-            }
-        }
-
-        // Disable eFuse access
-        mmio_write8(REG_EFUSE_ACCESS, 0x00);
+bool RTL8723BE::initMac() {
+    if (!powerOn()) {
+        IOLog("RTL8723BE: power-on sequence failed\n");
+        return false;
     }
+    fInitStage = kStagePowerOn;
 
-    // Decode physical PG stream into logical shadow map (0x00D0 = MAC, 0x00B9 = crystal_cap, etc.)
-    decodePGStream(phys_efuse, sizeof(phys_efuse), outCalib);
-
-    // Apply 40MHz crystal capacitor calibration to REG_MAC_PHY_CTRL (0x0024 bits [23:12])
-    if (fMMIOBase && mmio_read32(0x0000) != 0xFFFFFFFFU) {
-        uint8_t xtal = outCalib.crystal_cap & 0x3FU;
-        uint32_t mac_phy = mmio_read32(0x0024) & ~0x00FFF000U;
-        mac_phy |= (((uint32_t)xtal | ((uint32_t)xtal << 6)) << 12);
-        mmio_write32(0x0024, mac_phy);
+    mmio_write8(REG_MULTI_FUNC_CTRL, mmio_read8(REG_MULTI_FUNC_CTRL) | 0x08);
+    mmio_write8(REG_APS_FSMCO, mmio_read8(REG_APS_FSMCO) | 0x10);
+    mmio_write8(REG_CR, 0xFF);
+    IOSleep(2);
+    mmio_write8(REG_HWSEQ_CTRL, mmio_read8(REG_HWSEQ_CTRL) | 0x7F);
+    IOSleep(2);
+    if (mmio_read8(REG_SYS_CFG + 3) & 0x01) {
+        mmio_write8(0x007C, mmio_read8(0x007C) | 0x40);
     }
+    mmio_write8(REG_SYS_CLKR, mmio_read8(REG_SYS_CLKR) | 0x08);
+    mmio_write8(REG_GPIO_MUXCFG + 1, mmio_read8(REG_GPIO_MUXCFG + 1) & ~0x10);
+    mmio_write16(REG_CR, 0x02FF);
 
-    return true;
-}
-
-bool RTL8723BE::decodePGStream(const uint8_t *pgStream, size_t len, CalibData &outCalib) {
-    if (!pgStream || len == 0) return false;
-
-    uint8_t shadow_map[512];
-    memset(shadow_map, 0xFF, 512);
-
-    size_t idx = 0;
-    while (idx < len) {
-        uint8_t header = pgStream[idx++];
-        if (header == 0xFF) break;
-
-        uint8_t offset_index = (header >> 4) & 0x0F;
-        uint8_t word_mask = ~header & 0x0F;
-
-        size_t base_word = (size_t)offset_index * 8;
-        for (int w = 0; w < 4; ++w) {
-            if (word_mask & (1 << w)) {
-                if (idx + 1 >= len) break;
-                uint8_t b0 = pgStream[idx++];
-                uint8_t b1 = pgStream[idx++];
-                size_t byte_addr = (base_word + (size_t)w) * 2;
-                if (byte_addr + 1 < 512) {
-                    shadow_map[byte_addr] = b0;
-                    shadow_map[byte_addr + 1] = b1;
-                }
-            }
-        }
-    }
-
-    memcpy(outCalib.mac_addr, &shadow_map[0x00D0], 6);
-    outCalib.crystal_cap = shadow_map[0x00B9];
-    outCalib.thermal_meter = shadow_map[0x00BA];
-    outCalib.channel_plan = shadow_map[0x00B8];
-
-    if (outCalib.mac_addr[0] == 0xFF && outCalib.mac_addr[1] == 0xFF) {
-        uint8_t def_mac[6] = {0x00, 0xE0, 0x4C, 0x87, 0x23, 0xBE};
-        memcpy(outCalib.mac_addr, def_mac, 6);
-    }
-    if (outCalib.crystal_cap == 0xFF) outCalib.crystal_cap = 0x20;
-    if (outCalib.thermal_meter == 0xFF) outCalib.thermal_meter = 0x1A;
-    if (outCalib.tx_pwr_cck[0] == 0xFF) {
-        for (int i = 0; i < 6; ++i) outCalib.tx_pwr_cck[i] = 0x2D;
-    }
-
-    return true;
-}
-
-// ============================================================================
-// 8051 MCU Firmware Download Engine (32-bit Block Transfer)
-// ============================================================================
-
-bool RTL8723BE::downloadFirmware(const uint8_t *fwBuf, size_t fwLen) {
-    if (!fMMIOBase || mmio_read32(0x0000) == 0xFFFFFFFFU) return false;
-    if (!fwBuf || fwLen < sizeof(RTLFirmwareHeader)) return false;
-
-    const RTLFirmwareHeader *hdr = (const RTLFirmwareHeader*)fwBuf;
-    uint16_t sig = OSSwapLittleToHostInt16(hdr->signature);
-    if ((sig & 0xFFF0) != 0x5300) {
-        IOLog("RTL8723BE: Invalid firmware signature: 0x%04x\n", sig);
+    if (!initLLT()) {
+        IOLog("RTL8723BE: LLT table init failed\n");
         return false;
     }
 
-    const uint8_t *microcode = fwBuf + sizeof(RTLFirmwareHeader);
-    size_t payload_len = fwLen - sizeof(RTLFirmwareHeader);
+    mmio_write32(REG_HISR, 0xFFFFFFFFU);
+    mmio_write32(REG_HISRE, 0xFFFFFFFFU);
+    mmio_write8(REG_FWIMR + 3, mmio_read8(REG_FWIMR + 3) | 0x40);
 
-    // 1. Enable 8051 MCU function bit (FEN_CPUEN = BIT(10)) in REG_SYS_FUNC_EN (0x0002)
-    uint16_t func_en = mmio_read16(REG_SYS_FUNC_EN);
-    mmio_write16(REG_SYS_FUNC_EN, func_en | (1U << 10));
+    uint16_t trx = mmio_read16(REG_TRXDMA_CTRL);
+    mmio_write16(REG_TRXDMA_CTRL, (uint16_t)((trx & 0xF) | 0xF5B1));
+    mmio_write8(REG_FWHW_TXQ_CTRL + 1, 0x1F);
+    mmio_write32(REG_RCR, RTL8723BE_RCR_DEFAULT | RCR_AICV);
+    mmio_write16(REG_RXFLTMAP2, 0xFFFF);
+    mmio_write32(REG_TCR, RTL8723BE_TCR_DEFAULT);
 
-    // 2. MCU self-reset if active
-    if (mmio_read32(REG_MCUFWDL) & MCUFWDL_FW_RESET) {
-        mmio_write32(REG_MCUFWDL, 0x00000000);
-        IODelay(50);
+    mmio_write32(REG_BCNQ_DESA, (uint32_t)fTxRing[Q_BCN].ioaddr);
+    mmio_write32(REG_MGQ_DESA, (uint32_t)fTxRing[Q_MGNT].ioaddr);
+    mmio_write32(REG_VOQ_DESA, (uint32_t)fTxRing[Q_VO].ioaddr);
+    mmio_write32(REG_VIQ_DESA, (uint32_t)fTxRing[Q_VI].ioaddr);
+    mmio_write32(REG_BEQ_DESA, (uint32_t)fTxRing[Q_BE].ioaddr);
+    mmio_write32(REG_BKQ_DESA, (uint32_t)fTxRing[Q_BK].ioaddr);
+    mmio_write32(REG_HQ_DESA, (uint32_t)fTxRing[Q_HIGH].ioaddr);
+    mmio_write32(REG_RX_DESA, (uint32_t)fRxRing.ioaddr);
+
+    mmio_write8(REG_PCIE_CTRL_REG + 3, mmio_read8(REG_PCIE_CTRL_REG + 3) | 0x77);
+    mmio_write32(REG_INT_MIG, 0);
+    mmio_write32(REG_MCUTST_1, 0);
+    mmio_write8(REG_SECONDARY_CCA_CTRL, 0x3);
+
+    // DPDT / fixed board antenna wiring (Kordan, 2013-01-14)
+    setBBReg(0x64, 1U << 20, 0);
+    setBBReg(0x64, 1U << 24, 0);
+    setBBReg(0x40, 1U << 4, 0);
+    setBBReg(0x40, 1U << 3, 1);
+    setBBReg(0x4C, (1U << 24) | (1U << 23), 0x2);
+    setBBReg(0x944, 0x3, 0x3);
+    setBBReg(0x930, 0xFF, 0x77);
+    setBBReg(0x38, 1U << 11, 1);
+
+    mmio_write8(REG_RXDMA_CONTROL, mmio_read8(REG_RXDMA_CONTROL) & ~0x04);
+    return true;
+}
+
+// ============================================================================
+// eFuse (Linux efuse.c read_efuse_byte / read_efuse / efuse_power_switch)
+// ============================================================================
+
+uint8_t RTL8723BE::readEfuseByte(uint16_t addr) {
+    mmio_write8(REG_EFUSE_CTRL + 1, (uint8_t)(addr & 0xFF));
+    uint8_t b2 = mmio_read8(REG_EFUSE_CTRL + 2);
+    mmio_write8(REG_EFUSE_CTRL + 2, (uint8_t)(((addr >> 8) & 0x03) | (b2 & 0xFC)));
+    uint8_t b3 = mmio_read8(REG_EFUSE_CTRL + 3);
+    mmio_write8(REG_EFUSE_CTRL + 3, b3 & 0x7F);
+    for (int retry = 0; retry < 1000; ++retry) {
+        if (mmio_read8(REG_EFUSE_CTRL + 3) & 0x80) break;
+        IODelay(1);
     }
-
-    // 3. Reset 8051 CPU core before SRAM upload
-    mmio_write16(REG_SYS_FUNC_EN, func_en & ~(1U << 10));
-    IODelay(10);
-    mmio_write16(REG_SYS_FUNC_EN, func_en | (1U << 10));
-
-    // 4. Enter download mode
-    mmio_write8(REG_MCUFWDL, mmio_read8(REG_MCUFWDL) | 0x01);
-    mmio_write32(REG_MCUFWDL, mmio_read32(REG_MCUFWDL) & 0xFFF0FFFFU);
-    IODelay(10);
-
-    // 5. Download page-by-page using 32-bit DWORD writes (4x faster & bus-safe)
-    size_t num_pages = (payload_len + 4095) / 4096;
-    if (num_pages > 8) return false;
-
-    for (size_t p = 0; p < num_pages; ++p) {
-        uint8_t page_reg = mmio_read8(REG_MCUFWDL_PAGE) & 0xF8;
-        mmio_write8(REG_MCUFWDL_PAGE, page_reg | (uint8_t)(p & 0x07));
-
-        size_t page_offset = p * 4096;
-        size_t chunk_len = (payload_len - page_offset) < 4096 ? (payload_len - page_offset) : 4096;
-
-        size_t i = 0;
-        for (; i + 4 <= chunk_len; i += 4) {
-            uint32_t dw = ((uint32_t)microcode[page_offset + i + 0]) |
-                          (((uint32_t)microcode[page_offset + i + 1]) << 8) |
-                          (((uint32_t)microcode[page_offset + i + 2]) << 16) |
-                          (((uint32_t)microcode[page_offset + i + 3]) << 24);
-            mmio_write32(REG_FW_START_ADDR + (uint32_t)i, dw);
-        }
-        for (; i < chunk_len; ++i) {
-            mmio_write8(REG_FW_START_ADDR + (uint32_t)i, microcode[page_offset + i]);
-        }
-    }
-
-    // 6. Exit download mode
-    mmio_write8(REG_MCUFWDL, mmio_read8(REG_MCUFWDL) & ~0x01);
     IODelay(50);
+    return (uint8_t)(mmio_read32(REG_EFUSE_CTRL) & 0xFF);
+}
 
-    // 7. Verify Checksum Report
-    uint32_t fwdl_status = mmio_read32(REG_MCUFWDL);
-    if ((fwdl_status & MCUFWDL_CHKSUM_RPT) == 0) {
-        IOLog("RTL8723BE: Firmware checksum status=0x%08x\n", fwdl_status);
-        return false;
+bool RTL8723BE::readEfuse(CalibData &out) {
+    uint8_t phys[RTL8723BE_EFUSE_REAL_LEN];
+    uint8_t map[RTL8723BE_EFUSE_MAP_LEN];
+
+    memset(&out, 0, sizeof(out));
+
+    // efuse_power_switch(hw, false, true)
+    mmio_write8(REG_EFUSE_ACCESS, 0x69);
+    uint16_t fen = mmio_read16(REG_SYS_FUNC_EN);
+    if (!(fen & (1U << 12))) mmio_write16(REG_SYS_FUNC_EN, fen | (1U << 12));      // FEN_ELDR
+    uint16_t clk = mmio_read16(REG_SYS_CLKR);
+    if ((clk & 0x22) != 0x22) mmio_write16(REG_SYS_CLKR, clk | 0x22);             // LOADER_CLK_EN | ANA8M
+
+    size_t n = 0;
+    for (; n < sizeof(phys); ++n) {
+        phys[n] = readEfuseByte((uint16_t)n);
+    }
+    uint8_t pkg = readEfuseByte(0x1FB);
+    mmio_write8(REG_EFUSE_ACCESS, 0x00);
+
+    out.efuse_used = (uint16_t)rtlEfuseDecode(phys, sizeof(phys), map, sizeof(map));
+
+    switch (pkg & 0x7) {
+    case 0x4: out.package_type = 4; break; // TFBGA79
+    case 0x5: out.package_type = 2; break; // TFBGA90
+    case 0x6: out.package_type = 1; break; // QFN68
+    case 0x7: out.package_type = 3; break; // TFBGA80
+    default:  out.package_type = 0; break;
     }
 
-    // 8. Signal MCU Ready (_FW_DOWNLOAD_READY)
-    uint32_t ctl = (fwdl_status | MCUFWDL_RDY) & ~MCUFWDL_WINTINI_RDY;
-    mmio_write32(REG_MCUFWDL, ctl);
-    IODelay(10);
+    uint16_t eepromId = (uint16_t)(map[0] | (map[1] << 8));
+    out.autoload_ok = (eepromId == RTL8723BE_EEPROM_ID);
 
-    // 8.5 Trigger 8051 CPU self-reset (Linux rtl8723be_firmware_selfreset in fw_common.c)
-    // so the 8051 jumps from Mask ROM into the newly downloaded SRAM microcode (RAM_DL_SEL=1)!
+    memcpy(out.mac_addr, &map[EEPROM_MAC_ADDR], 6);
+    out.crystal_cap = map[EEPROM_XTAL_8723BE];
+    out.thermal_meter = map[EEPROM_THERMAL_METER];
+    out.channel_plan = map[EEPROM_CHANNELPLAN];
+    out.customer_id = map[EEPROM_CUSTOMER_ID];
+    out.bt_setting = map[EEPROM_RF_BT_SETTING_8723B];
+    out.vid = (uint16_t)(map[EEPROM_VID] | (map[EEPROM_VID + 1] << 8));
+    out.did = (uint16_t)(map[EEPROM_DID] | (map[EEPROM_DID + 1] << 8));
+    out.svid = (uint16_t)(map[EEPROM_SVID] | (map[EEPROM_SVID + 1] << 8));
+    out.smid = (uint16_t)(map[EEPROM_SMID] | (map[EEPROM_SMID + 1] << 8));
+    // 2.4G CCK / HT40 base power indexes for path A group 0..5 (Linux _rtl8723be_read_power_value_fromprom)
+    memcpy(out.tx_pwr_cck, &map[EEPROM_TX_PWR_INX], 6);
+    memcpy(out.tx_pwr_ht40, &map[EEPROM_TX_PWR_INX + 6], 5);
+    out.tx_pwr_ht20_diff = map[EEPROM_TX_PWR_INX + 11];
+
+    bool macValid = out.autoload_ok &&
+                    !((out.mac_addr[0] & 0x01) != 0) &&
+                    !(out.mac_addr[0] == 0xFF && out.mac_addr[1] == 0xFF && out.mac_addr[2] == 0xFF) &&
+                    !(out.mac_addr[0] == 0 && out.mac_addr[1] == 0 && out.mac_addr[2] == 0);
+    if (!macValid) {
+        // Locally administered fallback that is still unique per boot.
+        uint8_t rnd[3];
+        read_random(rnd, sizeof(rnd));
+        const uint8_t fallback[6] = {0x02, 0xE0, 0x4C, rnd[0], rnd[1], rnd[2]};
+        memcpy(out.mac_addr, fallback, 6);
+    }
+    if (out.crystal_cap == 0xFF) out.crystal_cap = 0x20;
+    if (out.thermal_meter == 0xFF) out.thermal_meter = 0x18;
+    for (int i = 0; i < 6; ++i) if (out.tx_pwr_cck[i] == 0xFF || out.tx_pwr_cck[i] == 0) out.tx_pwr_cck[i] = 0x2D;
+    for (int i = 0; i < 5; ++i) if (out.tx_pwr_ht40[i] == 0xFF || out.tx_pwr_ht40[i] == 0) out.tx_pwr_ht40[i] = 0x2D;
+    return out.autoload_ok;
+}
+
+// ============================================================================
+// 8051 firmware download (Linux rtl8723_download_fw)
+// ============================================================================
+
+void RTL8723BE::firmwareSelfReset() {
     mmio_write8(REG_RSV_CTRL + 1, mmio_read8(REG_RSV_CTRL + 1) & ~0x01U);
     mmio_write8(REG_SYS_FUNC_EN + 1, mmio_read8(REG_SYS_FUNC_EN + 1) & ~0x04U);
     IODelay(50);
     mmio_write8(REG_RSV_CTRL + 1, mmio_read8(REG_RSV_CTRL + 1) | 0x01U);
     mmio_write8(REG_SYS_FUNC_EN + 1, mmio_read8(REG_SYS_FUNC_EN + 1) | 0x04U);
-    IODelay(100);
+}
 
-    // 9. Poll for WINTINI_RDY (0x40)
-    int retries = 250;
-    while (retries-- > 0) {
-        fwdl_status = mmio_read32(REG_MCUFWDL);
-        if (fwdl_status & MCUFWDL_WINTINI_RDY) {
-            IOLog("RTL8723BE: Firmware WINTINI_RDY ready (status=0x%08x)\n", fwdl_status);
+bool RTL8723BE::downloadFirmware(const uint8_t *fwBuf, size_t fwLen) {
+    if (!fwBuf || fwLen < sizeof(RTLFirmwareHeader)) return false;
+
+    const RTLFirmwareHeader *hdr = (const RTLFirmwareHeader*)fwBuf;
+    const uint8_t *code = fwBuf;
+    size_t codeLen = fwLen;
+    if ((OSSwapLittleToHostInt16(hdr->signature) & 0xFFF0) == 0x5300) {
+        fFwVersion = OSSwapLittleToHostInt16(hdr->version);
+        fFwSubVersion = hdr->subversion;
+        code += sizeof(RTLFirmwareHeader);
+        codeLen -= sizeof(RTLFirmwareHeader);
+    }
+    if (codeLen > 8 * 4096) return false;
+
+    if (mmio_read8(REG_MCUFWDL) & 0x80) {
+        firmwareSelfReset();
+        mmio_write8(REG_MCUFWDL, 0x00);
+    }
+
+    // rtl8723_enable_fw_download(hw, true)
+    mmio_write8(REG_SYS_FUNC_EN + 1, mmio_read8(REG_SYS_FUNC_EN + 1) | 0x04);
+    mmio_write8(REG_MCUFWDL, mmio_read8(REG_MCUFWDL) | 0x01);
+    mmio_write8(REG_MCUFWDL + 2, mmio_read8(REG_MCUFWDL + 2) & 0xF7);
+
+    // rtl8723_write_fw: 4 KB pages, byte writes, image padded to a 4-byte multiple.
+    size_t padded = (codeLen + 3) & ~(size_t)3;
+    for (size_t page = 0; page * 4096 < padded; ++page) {
+        mmio_write8(REG_MCUFWDL + 2, (uint8_t)((mmio_read8(REG_MCUFWDL + 2) & 0xF8) | (page & 0x07)));
+        size_t base = page * 4096;
+        size_t chunk = (padded - base) < 4096 ? (padded - base) : 4096;
+        for (size_t i = 0; i < chunk; ++i) {
+            uint8_t b = (base + i < codeLen) ? code[base + i] : 0;
+            mmio_write8(REG_FW_START_ADDR + (uint32_t)i, b);
+        }
+    }
+
+    // rtl8723_enable_fw_download(hw, false)
+    mmio_write8(REG_MCUFWDL, mmio_read8(REG_MCUFWDL) & 0xFE);
+    mmio_write8(REG_MCUFWDL + 1, 0x00);
+
+    // rtl8723_fw_free_to_go
+    uint32_t v = 0;
+    bool chk = false;
+    for (int i = 0; i < 6000; ++i) {
+        v = mmio_read32(REG_MCUFWDL);
+        if (v & MCUFWDL_CHKSUM_RPT) { chk = true; break; }
+    }
+    if (!chk) {
+        IOLog("RTL8723BE: firmware checksum report failed (MCUFWDL=0x%08x)\n", v);
+        return false;
+    }
+    v = (mmio_read32(REG_MCUFWDL) | MCUFWDL_RDY) & ~MCUFWDL_WINTINI_RDY;
+    mmio_write32(REG_MCUFWDL, v);
+    firmwareSelfReset();
+
+    for (int i = 0; i < 600; ++i) {  // 600 x 5 ms = 3 s
+        v = mmio_read32(REG_MCUFWDL);
+        if (v & MCUFWDL_WINTINI_RDY) {
+            fFwReady = true;
             return true;
         }
-        IODelay(200);
+        IOSleep(5);
     }
-
-    // If hardware SRAM checksum (MCUFWDL_CHKSUM_RPT = 0x04) and MCUFWDL_RDY (0x02) succeeded,
-    // proceed rather than aborting driver attach.
-    if ((fwdl_status & (MCUFWDL_CHKSUM_RPT | MCUFWDL_RDY)) == (MCUFWDL_CHKSUM_RPT | MCUFWDL_RDY)) {
-        IOLog("RTL8723BE: Firmware checksum verified (status=0x%08x); proceeding\n", fwdl_status);
-        return true;
-    }
-
-    IOLog("RTL8723BE: Firmware WINTINI_RDY status=0x%08x\n", fwdl_status);
+    IOLog("RTL8723BE: firmware did not report WINTINI_RDY (MCUFWDL=0x%08x)\n", v);
     return false;
 }
 
 // ============================================================================
-// Baseband & RF Register Tables Initialization
+// PHY / RF table programming (Linux rtl8723be_phy_config_with_headerfile)
 // ============================================================================
 
-bool RTL8723BE::initBasebandAndRF() {
-    if (!fMMIOBase || mmio_read32(0x0000) == 0xFFFFFFFFU) return false;
+enum { kTableMac = 0, kTableBB, kTableAGC, kTableRF };
 
-    // 0. Enable BB & RF blocks before accessing 0x800+ BB/PHY or 0x840 LSSI registers
-    mmio_write16(REG_SYS_FUNC_EN, mmio_read16(REG_SYS_FUNC_EN) | 0x2003U);
-    mmio_write8(REG_RF_CTRL, 0x07U);
-    IODelay(10);
+// Linux _rtl8723be_check_positive(): evaluate an IF/ELSE-IF condition header.
+bool RTL8723BE::checkCondition(uint32_t cond1, uint32_t cond2) {
+    const uint32_t intf = 1U << 0; // PCIe
+    const uint8_t boardType = 0;   // no external LNA/PA on RTL8723BE modules
+    uint32_t driver1 = ((uint32_t)fCutVersion << 24) | (0x04U << 16) |
+                       ((uint32_t)fCalib.package_type << 12) | (intf << 8) | boardType;
+    uint32_t driver2 = 0;
 
-    // 1. Load MAC 1T Array (8-bit byte register writes per Linux _rtl8723be_phy_config_mac_with_headerfile)
-    for (size_t i = 0; i + 1 < RTL8723BEMAC_1T_ARRAYLEN; i += 2) {
-        uint32_t addr = RTL8723BEMAC_1T_ARRAY[i];
-        uint8_t  val  = (uint8_t)(RTL8723BEMAC_1T_ARRAY[i + 1] & 0xFFU);
-        if (addr < 0x4000U) {
-            mmio_write8(addr, val);
+    if ((cond1 & 0x0000F000U) != 0 && (cond1 & 0x0000F000U) != (driver1 & 0x0000F000U)) return false;
+    if ((cond1 & 0x0F000000U) != 0 && (cond1 & 0x0F000000U) != (driver1 & 0x0F000000U)) return false;
+
+    cond1 &= 0x00FF0FFFU;
+    driver1 &= 0x00FF0FFFU;
+    if ((cond1 & driver1) != cond1) return false;
+    if ((cond1 & 0x0F) == 0) return true;
+
+    uint32_t mask = 0;
+    if (cond1 & (1U << 0)) mask |= 0x000000FFU;
+    if (cond1 & (1U << 1)) mask |= 0x0000FF00U;
+    if (cond1 & (1U << 2)) mask |= 0x00FF0000U;
+    if (cond1 & (1U << 3)) mask |= 0xFF000000U;
+    return (cond2 & mask) == (driver2 & mask);
+}
+
+bool RTL8723BE::configTable(const uint32_t *table, size_t len, int kind) {
+    bool matched = true, skipped = false;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        uint32_t v1 = table[i];
+        uint32_t v2 = table[i + 1];
+
+        if (v1 & 0xC0000000U) {
+            if (v1 & 0x80000000U) {
+                uint8_t cond = (uint8_t)((v1 >> 28) & 0x3);
+                if (cond == 3) {            // ENDIF
+                    matched = true;
+                    skipped = false;
+                } else if (cond == 2) {     // ELSE
+                    matched = !skipped;
+                } else if (skipped) {       // IF / ELSE IF after a taken branch
+                    matched = false;
+                } else if (checkCondition(v1, v2)) {
+                    matched = true;
+                    skipped = true;
+                } else {
+                    matched = false;
+                    skipped = false;
+                }
+            }
+            continue;
+        }
+        if (!matched) continue;
+
+        switch (kind) {
+        case kTableMac:
+            if (v1 < 0x4000U) mmio_write8(v1, (uint8_t)v2);
+            break;
+        case kTableBB:
+            if (v1 == 0xFE) rtlDelayMs(50);
+            else if (v1 == 0xFD) rtlDelayMs(5);
+            else if (v1 == 0xFC) rtlDelayMs(1);
+            else if (v1 == 0xFB) IODelay(50);
+            else if (v1 == 0xFA) IODelay(5);
+            else if (v1 == 0xF9) IODelay(1);
+            else if (v1 < 0x4000U) { mmio_write32(v1, v2); IODelay(1); }
+            break;
+        case kTableAGC:
+            if (v1 < 0x4000U) { mmio_write32(v1, v2); IODelay(1); }
+            break;
+        case kTableRF:
+            if (v1 == 0xFE || v1 == 0xFFE) rtlDelayMs(50);
+            else if (v1 <= 0xFF) { setRFReg((uint8_t)v1, 0xFFFFF, v2); IODelay(1); }
+            break;
         }
     }
-
-    // 2. Load PHY Reg 1T Array (32-bit aligned BB registers)
-    for (size_t i = 0; i + 1 < RTL8723BEPHY_REG_1TARRAYLEN; i += 2) {
-        uint32_t addr = RTL8723BEPHY_REG_1TARRAY[i];
-        uint32_t val  = RTL8723BEPHY_REG_1TARRAY[i + 1];
-        if (addr >= 0xF9U && addr <= 0xFEU) {
-            IODelay(100);
-            continue;
-        }
-        if (addr < 0x4000U) {
-            mmio_write32(addr, val);
-            IODelay(1);
-        }
-    }
-
-    // 3. Load AGC Tab 1T Array
-    for (size_t i = 0; i + 1 < RTL8723BEAGCTAB_1TARRAYLEN; i += 2) {
-        uint32_t addr = RTL8723BEAGCTAB_1TARRAY[i];
-        uint32_t val  = RTL8723BEAGCTAB_1TARRAY[i + 1];
-        if (addr < 0x4000U) {
-            mmio_write32(addr, val);
-            IODelay(1);
-        }
-    }
-
-    // 4. Load PHY Reg PG Array — 6-tuple format: (rfpath, txnum, band, addr, bitmask, data)
-    for (size_t i = 0; i + 5 < RTL8723BEPHY_REG_ARRAY_PGLEN; i += 6) {
-        uint32_t addr = RTL8723BEPHY_REG_ARRAY_PG[i + 3];
-        uint32_t mask = RTL8723BEPHY_REG_ARRAY_PG[i + 4];
-        uint32_t data = RTL8723BEPHY_REG_ARRAY_PG[i + 5];
-        if (addr < 0x4000U && mask != 0) {
-            uint32_t orig  = mmio_read32(addr);
-            uint32_t shift = (uint32_t)__builtin_ctz(mask);
-            mmio_write32(addr, (orig & ~mask) | ((data << shift) & mask));
-            IODelay(1);
-        }
-    }
-
-    // 5. Load RF Radio A 1T Array (via 3-wire LSSI serial interface, handling ODM branch tags & delays)
-    bool skip_branch = false;
-    for (size_t i = 0; i + 1 < RTL8723BE_RADIOA_1TARRAYLEN; i += 2) {
-        uint32_t v1 = RTL8723BE_RADIOA_1TARRAY[i];
-        uint32_t v2 = RTL8723BE_RADIOA_1TARRAY[i + 1];
-
-        uint32_t tag = (v1 >> 28) & 0xFU;
-        if (tag == 0x8U || tag == 0x9U) {
-            // Conditional IF / ELSE_IF header (followed by 0x40000000, 0x00000000):
-            // Skip specialized board branches and take the default ELSE (0xA) branch
-            skip_branch = true;
-            continue;
-        } else if (tag == 0xAU) {
-            // ELSE default branch: execute entries
-            skip_branch = false;
-            continue;
-        } else if (tag == 0xBU) {
-            // ENDIF marker
-            skip_branch = false;
-            continue;
-        } else if (tag == 0x4U) {
-            continue;
-        }
-
-        if (skip_branch) continue;
-
-        if (v1 >= 0xF9U && v1 <= 0xFEU) {
-            IODelay(100);
-            continue;
-        }
-
-        if (v1 <= 0xEFU) {
-            writeRFRegister((uint8_t)v1, v2);
-        }
-    }
-
-    // 6. Force BT Coexistence PTA switch to Wi-Fi (GNT_WL=1, GNT_BT=0) & enable BB RFE pin mux
-    // Note: RTL8723BEMAC_1T_ARRAY writes 0x765 = 0x18 (GNT_BT=1), which disconnects Wi-Fi RX from the antenna!
-    mmio_write8(0x0067, mmio_read8(0x0067) | 0x20U); // BB control for SPDT switch
-    mmio_write8(0x0041, mmio_read8(0x0041) & ~0x08U);
-    mmio_write8(0x0765, 0x00U); // Clear forced GNT_BT so WLAN owns the 2.4 GHz RF path
-    mmio_write8(0x0764, 0x00U);
-    mmio_write8(0x0930, 0x77U); // RFE_CTRL_0 & RFE_CTRL_1 mux = software BB control
-    mmio_write32(0x0944, mmio_read32(0x0944) | 0x00000003U); // Enable RFE_CTRL_0/1 output drivers
-
-    // Enable CCK (BIT 24) and OFDM (BIT 25) RX/TX blocks in rFPGA0_RFMOD (0x0800)
-    mmio_write32(0x0800, mmio_read32(0x0800) | 0x03000000U);
-
-    // 7. Set Default Channel
-    setChannel(1);
-
     return true;
 }
 
-bool RTL8723BE::setChannel(uint8_t channel, uint8_t bw) {
+bool RTL8723BE::phyMacConfig() {
+    configTable(RTL8723BEMAC_1T_ARRAY, RTL8723BEMAC_1T_ARRAYLEN, kTableMac);
+    mmio_write8(REG_MAX_AGGR_NUM, 0x0B);
+    return true;
+}
+
+// Linux rtl8723be_phy_bb_config()
+bool RTL8723BE::phyBBConfig() {
+    uint16_t fen = mmio_read16(REG_SYS_FUNC_EN);
+    mmio_write16(REG_SYS_FUNC_EN, fen | (1U << 13) | (1U << 0) | (1U << 1));
+    mmio_write8(REG_RF_CTRL, 0x07);                    // RF_EN | RF_RSTB | RF_SDMRSTB
+    mmio_write8(REG_SYS_FUNC_EN, 0xE3);                // PPLL | PCIEA | DIO_PCIE | BB_GLB_RSTN | BBRSTB
+    mmio_write32(0x4C, mmio_read32(0x4C) | (1U << 23));
+    mmio_write8(REG_AFE_XTAL_CTRL + 1, 0x80);
+
+    // Switch the shared antenna to BT while the BB is programmed (as Linux does).
+    mmio_write32(0x948, fActiveAntenna == 2 ? 0x280 : 0x0);
+
+    configTable(RTL8723BEPHY_REG_1TARRAY, RTL8723BEPHY_REG_1TARRAYLEN, kTableBB);
+    // RTL8723BEPHY_REG_ARRAY_PG is a TX-power-by-rate table, not register writes.
+    configTable(RTL8723BEAGCTAB_1TARRAY, RTL8723BEAGCTAB_1TARRAYLEN, kTableAGC);
+
+    uint32_t xtal = fCalib.crystal_cap & 0x3F;
+    setBBReg(REG_MAC_PHY_CTRL, 0xFFF000, xtal | (xtal << 6));
+    return true;
+}
+
+// Linux _rtl8723be_phy_rf6052_config_parafile() for path A
+bool RTL8723BE::phyRFConfig() {
+    uint32_t savedEnv = getBBReg(RFPGA0_XAB_RFINTERFACESW, BRFSI_RFENV);
+    setBBReg(RFPGA0_XA_RFINTERFACEOE, BRFSI_RFENV << 16, 0x1);
+    IODelay(1);
+    setBBReg(RFPGA0_XA_RFINTERFACEOE, BRFSI_RFENV, 0x1);
+    IODelay(1);
+    setBBReg(RFPGA0_XA_HSSIPARAMETER2, B3WIREADDRESSLENGTH, 0x0);
+    IODelay(1);
+    setBBReg(RFPGA0_XA_HSSIPARAMETER2, B3WIREDATALENGTH, 0x0);
+    IODelay(1);
+
+    configTable(RTL8723BE_RADIOA_1TARRAY, RTL8723BE_RADIOA_1TARRAYLEN, kTableRF);
+    if (fOemHP) {
+        setRFReg(0x52, 0xFFFFF, 0x7E4BD);
+    }
+
+    setBBReg(RFPGA0_XAB_RFINTERFACESW, BRFSI_RFENV, savedEnv);
+    return true;
+}
+
+// Linux _rtl8723be_hw_configure()
+void RTL8723BE::hwConfigure() {
+    mmio_write32(REG_RRSR, 0x00000FFFU);   // RATE_ALL_CCK | RATE_ALL_OFDM_AG
+    mmio_write32(REG_ARFR0 + 4, 0xFFFFF000U);
+    mmio_write32(REG_ARFR1 + 4, 0x003FF000U);
+    mmio_write16(REG_FWHW_TXQ_CTRL, 0x1F00);
+    mmio_write8(REG_AMPDU_MAX_TIME, 0x70);
+    mmio_write16(REG_RL, 0x0707);
+    mmio_write32(REG_DARFRC, 0x01000000U);
+    mmio_write32(REG_DARFRC + 4, 0x07060504U);
+    mmio_write32(REG_RARFRC, 0x01000000U);
+    mmio_write32(REG_RARFRC + 4, 0x07060504U);
+    mmio_write8(REG_BCN_CTRL, 0x1D);
+    mmio_write8(REG_TBTT_PROHIBIT + 1, 0xFF);
+    mmio_write16(REG_NAV_PROT_LEN, 0x0040);
+    mmio_write32(REG_FAST_EDCA_CTRL, 0x03086666U);
+    mmio_write8(REG_HT_SINGLE_AMPDU, 0x80);
+    mmio_write8(REG_RX_PKT_LIMIT, 0x20);
+    mmio_write8(REG_MAX_AGGR_NUM, 0x1F);
+}
+
+// WLAN-only BT-coexistence antenna setup (Linux halbtc8723b1ant/2ant init_hw_config with
+// firmware < v24 and an internal switch). Grants the shared RF front end to Wi-Fi.
+void RTL8723BE::btcoexInit() {
+    mmio_write8(0x0790, (uint8_t)((mmio_read8(0x0790) & 0xC0) | 0x05));
+
+    mmio_write8(0x0039, mmio_read8(0x0039) | 0x08);
+    mmio_write8(0x0974, 0xFF);
+    mmio_write8(0x0944, mmio_read8(0x0944) | 0x03);
+    mmio_write8(0x0930, 0x77);
+
+    // Internal switch: 0x4C[23] = 1, 0x4C[24] = 0; fixed external switch S1->Main, S0->Aux.
+    uint32_t r4c = mmio_read32(0x4C);
+    r4c |= (1U << 23);
+    r4c &= ~(1U << 24);
+    mmio_write32(0x4C, r4c);
+    mmio_write8(0x0064, mmio_read8(0x0064) & ~0x01);
+
+    // PTA: grant to PTA, WLAN_ACT controlled by PTA, S0/S1 selected by Wi-Fi.
+    mmio_write8(0x0765, 0x00);
+    mmio_write8(0x076E, 0x0C);
+    mmio_write8(0x0067, mmio_read8(0x0067) | 0x20);
+    mmio_write8(0x0040, mmio_read8(0x0040) | 0x20);
+
+    // Coex table type 0: Wi-Fi owns every slot while BT is idle.
+    mmio_write32(0x06C0, 0x55555555U);
+    mmio_write32(0x06C4, 0x55555555U);
+    mmio_write32(0x06C8, 0x00FFFFFFU);
+    mmio_write8(0x06CC, 0x03);
+
+    // Wi-Fi on S1 (main) -> 0x948 = 0x000, on S0 (aux) -> 0x948 = 0x280.
+    mmio_write32(0x0948, fActiveAntenna == 2 ? 0x280 : 0x0);
+    // rtl8723be_phy_set_rfpath_switch(hw, 1)
+    mmio_write32(REG_BB_PAD_CTRL, 0x1);
+    applyCoexProfile();
+}
+
+// Linux _rtl8723be_fill_h2c_command() for commands of up to 3 parameter bytes.
+bool RTL8723BE::sendH2C(uint8_t id, const uint8_t *params, uint8_t len) {
+    if (!fFwReady || len > 3) return false;
+    uint8_t box = fLastHmeBox;
+    bool free = false;
+    for (int i = 0; i < 100; ++i) {
+        if (((mmio_read8(REG_HMETFR) >> box) & 0x01) == 0) { free = true; break; }
+        IODelay(10);
+    }
+    if (!free) {
+        IOLog("RTL8723BE: H2C 0x%02x: firmware did not drain mailbox %u\n", id, box);
+        return false;
+    }
+    uint8_t content[4] = {id, 0, 0, 0};
+    for (uint8_t i = 0; i < len; ++i) content[1 + i] = params[i];
+    for (uint8_t i = 0; i < 4; ++i) mmio_write8(REG_HMEBOX_0 + box * 4U + i, content[i]);
+    fLastHmeBox = (uint8_t)((box + 1) & 0x3);
+    return true;
+}
+
+// Settings that differ between Linux's 1-antenna (halbtc8723b1ant, what ant_sel=1 selects)
+// and 2-antenna (halbtc8723b2ant) coexistence code for a Wi-Fi-only link.
+void RTL8723BE::applyCoexProfile() {
+    setRFReg(0x01, 0xFFFFF, fAntNum == 1 ? 0x780 : 0x0);   // Wi-Fi TRx mask
+    mmio_write8(0x0778, fAntNum == 1 ? 0x01 : 0x03);        // coex counter statistics
+
+    // Tell the firmware where the Wi-Fi antenna is (H2C 0x65: inverse, internal switch) and,
+    // for firmware >= v24, release GNT_BT through the firmware (H2C 0x6E) instead of 0x765.
+    if (fFwReady) {
+        const uint8_t antInfo[2] = {(uint8_t)(fActiveAntenna == 2 ? 1 : 0), 0};
+        sendH2C(0x65, antInfo, 2);
+        if (fFwVersion >= 0x18) {
+            const uint8_t gntBtLow = 0;
+            sendH2C(0x6E, &gntBtLow, 1);
+        }
+    }
+    IOLog("RTL8723BE: BT-coex profile: %u-antenna\n", fAntNum);
+}
+
+// Linux _rtl8723be_phy_lc_calibrate(hw, false)
+void RTL8723BE::lcCalibrate() {
+    uint8_t tmp = mmio_read8(0x0D03);
+    uint32_t rfMode = 0;
+    if (tmp & 0x70) {
+        mmio_write8(0x0D03, tmp & 0x8F);
+        rfMode = getRFReg(0x00, 0xFFF);
+        setRFReg(0x00, 0xFFF, (rfMode & 0x8FFFF) | 0x10000);
+    } else {
+        mmio_write8(REG_TXPAUSE, 0xFF);
+    }
+    setRFReg(0xB0, 0xFFFFF, 0xDFBE0);
+    setRFReg(RF_CHNLBW, 0xFFF, 0x8C0A);
+    rtlDelayMs(50);
+    setRFReg(0xB0, 0xFFFFF, 0xDFFE0);
+    if (tmp & 0x70) {
+        mmio_write8(0x0D03, tmp);
+        setRFReg(0x00, 0xFFF, rfMode);
+    } else {
+        mmio_write8(REG_TXPAUSE, 0x00);
+    }
+}
+
+// ============================================================================
+// IQ calibration (Linux rtl8723be_phy_iq_calibrate, both internal RF paths)
+// ============================================================================
+
+enum {
+    RFPGA0_IQK = 0xE28, RTX_IQK_TONE_A = 0xE30, RRX_IQK_TONE_A = 0xE34, RTX_IQK_PI_A = 0xE38,
+    RRX_IQK_PI_A = 0xE3C, RTX_IQK = 0xE40, RRX_IQK = 0xE44, RIQK_AGC_PTS = 0xE48, RIQK_AGC_RSP = 0xE4C,
+    RTX_IQK_TONE_B = 0xE50, RRX_IQK_TONE_B = 0xE54, RTX_IQK_PI_B = 0xE58, RRX_IQK_PI_B = 0xE5C,
+    ROFDM0_XARXIQIMBALANCE = 0xC14, ROFDM0_XBRXIQIMBALANCE = 0xC1C, ROFDM0_ECCATHRESHOLD = 0xC4C,
+    ROFDM0_XATXIQIMBALANCE = 0xC80, ROFDM0_XBTXIQIMBALANCE = 0xC88, ROFDM0_XCTXAFE = 0xC94,
+    ROFDM0_XDTXAFE = 0xC9C, RF_WE_LUT = 0xEF, RF_RCK_OS = 0x30, RF_TXPA_G1 = 0x31, RF_TXPA_G2 = 0x32
+};
+
+static bool iqkTxOk(uint32_t eac, uint32_t e94, uint32_t e9c) {
+    if ((eac & (1U << 28)) || ((e94 & 0x03FF0000) >> 16) == 0x142 || ((e9c & 0x03FF0000) >> 16) == 0x42)
+        return false;
+    uint32_t tmp = (e9c & 0x03FF0000) >> 16;
+    if (tmp & 0x200) tmp = 0x400 - tmp;
+    uint32_t x = (e94 & 0x03FF0000) >> 16;
+    return x < 0x110 && x > 0xF0 && tmp < 0xF;
+}
+
+static bool iqkRxOk(uint32_t eac, uint32_t ea4) {
+    uint32_t tmp = (eac & 0x03FF0000) >> 16;
+    if (tmp & 0x200) tmp = 0x400 - tmp;
+    if (!(eac & (1U << 27)) && ((ea4 & 0x03FF0000) >> 16) != 0x132 && ((eac & 0x03FF0000) >> 16) != 0x36)
+        return true;
+    uint32_t x = (ea4 & 0x03FF0000) >> 16;
+    return !(eac & (1U << 27)) && x < 0x110 && x > 0xF0 && tmp < 0xF;
+}
+
+void RTL8723BE::iqkOneShot(uint32_t agcRsp) {
+    setBBReg(RIQK_AGC_RSP, 0xFFFFFFFF, agcRsp);
+    setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0x80800000);
+    setBBReg(RIQK_AGC_PTS, 0xFFFFFFFF, 0xF9000000);
+    setBBReg(RIQK_AGC_PTS, 0xFFFFFFFF, 0xF8000000);
+    IOSleep(10);
+    setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0x00000000);
+}
+
+void RTL8723BE::iqkTones(uint32_t txToneA, uint32_t rxToneA, uint32_t txPiA, uint32_t rxPiA) {
+    setBBReg(RTX_IQK_TONE_A, 0xFFFFFFFF, txToneA);
+    setBBReg(RRX_IQK_TONE_A, 0xFFFFFFFF, rxToneA);
+    setBBReg(RTX_IQK_TONE_B, 0xFFFFFFFF, 0x38008C1C);
+    setBBReg(RRX_IQK_TONE_B, 0xFFFFFFFF, 0x38008C1C);
+    setBBReg(RTX_IQK_PI_A, 0xFFFFFFFF, txPiA);
+    setBBReg(RRX_IQK_PI_A, 0xFFFFFFFF, rxPiA);
+    setBBReg(RTX_IQK_PI_B, 0xFFFFFFFF, 0x82110000);
+    setBBReg(RRX_IQK_PI_B, 0xFFFFFFFF, 0x28110000);
+}
+
+// Path A = S1 (0x948 = 0x000), path B = S0 (0x948 = 0x280). Returns bit0 TX ok, bit1 RX ok.
+uint8_t RTL8723BE::iqkTx(bool pathB) {
+    setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0);
+    mmio_write32(0x948, pathB ? 0x280 : 0x0);
+    if (pathB) {
+        setRFReg(0xED, 0xFFFFF, 0x00020);
+        setRFReg(0x43, 0xFFFFF, 0x40FC1);
+    } else {
+        setRFReg(RF_WE_LUT, 0xFFFFF, 0x800A0);
+        setRFReg(RF_RCK_OS, 0xFFFFF, 0x20000);
+        setRFReg(RF_TXPA_G1, 0xFFFFF, 0x0003F);
+        setRFReg(RF_TXPA_G2, 0xFFFFF, 0xC7F87);
+    }
+    setBBReg(RTX_IQK, 0xFFFFFFFF, 0x01007C00);
+    setBBReg(RRX_IQK, 0xFFFFFFFF, 0x01004800);
+    iqkTones(0x18008C1C, 0x38008C1C, 0x821403EA, pathB ? 0x28110000 : 0x28160000);
+    iqkOneShot(0x00462911);
+    uint32_t eac = mmio_read32(0xEAC), e94 = mmio_read32(0xE94), e9c = mmio_read32(0xE9C);
+    return iqkTxOk(eac, e94, e9c) ? 0x01 : 0x00;
+}
+
+uint8_t RTL8723BE::iqkRx(bool pathB) {
+    setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0);
+    mmio_write32(0x948, pathB ? 0x280 : 0x0);
+
+    // 1. TX IQK to obtain the TXIMR setting used as the RX IQK stimulus
+    if (pathB) {
+        setRFReg(RF_WE_LUT, 0xFFFFF, 0x800A0);
+        setRFReg(RF_RCK_OS, 0xFFFFF, 0x30000);
+        setRFReg(RF_TXPA_G1, 0xFFFFF, 0x0001F);
+        setRFReg(RF_TXPA_G2, 0xFFFFF, 0xF7FF7);
+        setRFReg(0xED, 0xFFFFF, 0x00020);
+        setRFReg(0x43, 0xFFFFF, 0x60FED);
+    } else {
+        setRFReg(RF_WE_LUT, 0x80000, 0x1);
+        setRFReg(RF_RCK_OS, 0xFFFFF, 0x30000);
+        setRFReg(RF_TXPA_G1, 0xFFFFF, 0x0001F);
+        setRFReg(RF_TXPA_G2, 0xFFFFF, 0xF7FB7);
+        setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0x80800000);
+    }
+    setBBReg(RTX_IQK, 0xFFFFFFFF, 0x01007C00);
+    setBBReg(RRX_IQK, 0xFFFFFFFF, 0x01004800);
+    iqkTones(0x18008C1C, 0x38008C1C, 0x82160FF0, 0x28110000);
+    iqkOneShot(0x0046A911);
+    uint32_t eac = mmio_read32(0xEAC), e94 = mmio_read32(0xE94), e9c = mmio_read32(0xE9C);
+    if (!iqkTxOk(eac, e94, e9c)) return 0x00;
+    setBBReg(RTX_IQK, 0xFFFFFFFF, 0x80007C00 | (e94 & 0x3FF0000) | ((e9c & 0x3FF0000) >> 16));
+
+    // 2. RX IQK
+    setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0);
+    setRFReg(RF_WE_LUT, 0x80000, 0x1);
+    setRFReg(RF_RCK_OS, 0xFFFFF, 0x30000);
+    setRFReg(RF_TXPA_G1, 0xFFFFF, 0x0001F);
+    setRFReg(RF_TXPA_G2, 0xFFFFF, 0xF7D77);
+    if (pathB) {
+        setRFReg(RF_WE_LUT, 0x80000, 0x0);
+        setRFReg(0xED, 0xFFFFF, 0x00020);
+        setRFReg(0x43, 0xFFFFF, 0x60FBD);
+    } else {
+        setRFReg(0xDF, 0xFFFFF, 0xF80);
+        setRFReg(0x55, 0xFFFFF, 0x4021F);
+    }
+    setBBReg(RRX_IQK, 0xFFFFFFFF, 0x01004800);
+    iqkTones(0x38008C1C, 0x18008C1C, 0x82110000, 0x2816001F);
+    iqkOneShot(0x0046A8D1);
+    eac = mmio_read32(0xEAC);
+    uint32_t ea4 = mmio_read32(0xEA4);
+    if (!pathB) {
+        setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0);
+        setRFReg(0xDF, 0xFFFFF, 0x780);
+    }
+    return iqkRxOk(eac, ea4) ? 0x03 : 0x01;
+}
+
+void RTL8723BE::iqkRun(long result[][8], uint8_t t) {
+    static const uint32_t addaReg[16] = {0x85C, 0xE6C, 0xE70, 0xE74, 0xE78, 0xE7C, 0xE80, 0xE84,
+                                         0xE88, 0xE8C, 0xED0, 0xED4, 0xED8, 0xEDC, 0xEE0, 0xEEC};
+    static const uint32_t macReg[4] = {0x522, 0x550, 0x551, 0x040};
+    static const uint32_t bbReg[9] = {0xC04, 0xC08, 0x874, 0xB68, 0xB6C, 0x870, 0x860, 0x864, 0xA04};
+
+    uint8_t c50 = mmio_read8(0xC50);
+    uint8_t c58 = mmio_read8(0xC58);
+    if (t == 0) {
+        for (int i = 0; i < 16; ++i) fIqkAdda[i] = mmio_read32(addaReg[i]);
+        for (int i = 0; i < 3; ++i) fIqkMac[i] = mmio_read8(macReg[i]);
+        fIqkMac[3] = mmio_read32(macReg[3]);
+        for (int i = 0; i < 9; ++i) fIqkBB[i] = mmio_read32(bbReg[i]);
+    }
+    for (int i = 0; i < 16; ++i) mmio_write32(addaReg[i], 0x01C00014);   // path ADDA on
+    uint32_t pathSel = mmio_read32(0x948);
+
+    // MAC setting for calibration: pause TX, clear BCN_CTRL bit 3, 0x40 bit 5
+    mmio_write8(macReg[0], 0x3F);
+    for (int i = 1; i < 3; ++i) mmio_write8(macReg[i], (uint8_t)(fIqkMac[i] & ~0x08));
+    mmio_write8(macReg[3], (uint8_t)(fIqkMac[3] & ~0x20));
+
+    setBBReg(0xA04, 0x0F000000, 0xF);
+    setBBReg(0xC04, 0xFFFFFFFF, 0x03A05600);
+    setBBReg(0xC08, 0xFFFFFFFF, 0x000800E4);
+    setBBReg(0x874, 0xFFFFFFFF, 0x22204000);
+
+    for (int i = 0; i < 2; ++i) {
+        if (iqkTx(false) == 0x01) {
+            result[t][0] = (mmio_read32(0xE94) & 0x3FF0000) >> 16;
+            result[t][1] = (mmio_read32(0xE9C) & 0x3FF0000) >> 16;
+            break;
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (iqkRx(false) == 0x03) {
+            result[t][2] = (mmio_read32(0xEA4) & 0x3FF0000) >> 16;
+            result[t][3] = (mmio_read32(0xEAC) & 0x3FF0000) >> 16;
+            break;
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (iqkTx(true) == 0x01) {
+            result[t][4] = (mmio_read32(0xE94) & 0x3FF0000) >> 16;
+            result[t][5] = (mmio_read32(0xE9C) & 0x3FF0000) >> 16;
+            break;
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (iqkRx(true) == 0x03) {
+            result[t][6] = (mmio_read32(0xEA4) & 0x3FF0000) >> 16;
+            result[t][7] = (mmio_read32(0xEAC) & 0x3FF0000) >> 16;
+            break;
+        }
+    }
+
+    setBBReg(RFPGA0_IQK, 0xFFFFFFFF, 0);
+    if (t != 0) {
+        for (int i = 0; i < 16; ++i) mmio_write32(addaReg[i], fIqkAdda[i]);
+        for (int i = 0; i < 3; ++i) mmio_write8(macReg[i], (uint8_t)fIqkMac[i]);
+        mmio_write32(macReg[3], fIqkMac[3]);
+        for (int i = 0; i < 9; ++i) mmio_write32(bbReg[i], fIqkBB[i]);
+        mmio_write32(0x948, pathSel);
+        mmio_write8(0xC50, 0x50);
+        mmio_write8(0xC50, c50);
+        mmio_write8(0xC58, 0x50);
+        mmio_write8(0xC58, c58);
+        setBBReg(0xE30, 0xFFFFFFFF, 0x01008C00);
+        setBBReg(0xE34, 0xFFFFFFFF, 0x01008C00);
+    }
+}
+
+static bool iqkSimilar(long result[][8], uint8_t c1, uint8_t c2) {
+    uint32_t bitmap = 0;
+    uint8_t finalCand[2] = {0xFF, 0xFF};
+    bool bresult = true;
+    for (uint32_t i = 0; i < 8; ++i) {
+        long t1 = result[c1][i], t2 = result[c2][i];
+        if (i & 1) {
+            if (t1 & 0x200) t1 |= (long)(int32_t)0xFFFFFC00;
+            if (t2 & 0x200) t2 |= (long)(int32_t)0xFFFFFC00;
+        }
+        uint32_t diff = (uint32_t)(t1 > t2 ? t1 - t2 : t2 - t1);
+        if (diff > 5) {
+            if ((i == 2 || i == 6) && !bitmap) {
+                if (result[c1][i] + result[c1][i + 1] == 0) finalCand[i / 4] = c2;
+                else if (result[c2][i] + result[c2][i + 1] == 0) finalCand[i / 4] = c1;
+                else bitmap |= (1U << i);
+            } else {
+                bitmap |= (1U << i);
+            }
+        }
+    }
+    if (bitmap == 0) {
+        for (uint32_t i = 0; i < 2; ++i) {
+            if (finalCand[i] != 0xFF) {
+                for (uint32_t j = i * 4; j < (i + 1) * 4 - 2; ++j) result[3][j] = result[finalCand[i]][j];
+                bresult = false;
+            }
+        }
+        return bresult;
+    }
+    if (!(bitmap & 0x03)) for (int i = 0; i < 2; ++i) result[3][i] = result[c1][i];
+    if (!(bitmap & 0x0C)) for (int i = 2; i < 4; ++i) result[3][i] = result[c1][i];
+    if (!(bitmap & 0x30)) for (int i = 4; i < 6; ++i) result[3][i] = result[c1][i];
+    if (!(bitmap & 0xC0)) for (int i = 6; i < 8; ++i) result[3][i] = result[c1][i];
+    return false;
+}
+
+// Fill the TX/RX IQ imbalance registers of one BB path from result[cand][base..base+3].
+void RTL8723BE::iqkFill(long result[][8], uint8_t cand, bool pathB, bool txOnly) {
+    const uint32_t txImb = pathB ? ROFDM0_XBTXIQIMBALANCE : ROFDM0_XATXIQIMBALANCE;
+    const uint32_t rxImb = pathB ? ROFDM0_XBRXIQIMBALANCE : ROFDM0_XARXIQIMBALANCE;
+    const uint32_t txAfe = pathB ? ROFDM0_XDTXAFE : ROFDM0_XCTXAFE;
+    const int base = pathB ? 4 : 0;
+    uint32_t old = (mmio_read32(txImb) >> 22) & 0x3FF;
+    uint32_t x = (uint32_t)result[cand][base];
+    if (x & 0x200) x |= 0xFFFFFC00;
+    uint32_t txA = (x * old) >> 8;
+    setBBReg(txImb, 0x3FF, txA);
+    setBBReg(ROFDM0_ECCATHRESHOLD, pathB ? (1U << 27) : (1U << 31), ((x * old) >> 7) & 1);
+    int64_t y = result[cand][base + 1];
+    if (y & 0x200) y |= (int64_t)(int32_t)0xFFFFFC00;
+    int64_t txC = (y * (int64_t)old) >> 8;
+    setBBReg(txAfe, 0xF0000000, (uint32_t)((txC & 0x3C0) >> 6));
+    setBBReg(txImb, 0x003F0000, (uint32_t)(txC & 0x3F));
+    setBBReg(ROFDM0_ECCATHRESHOLD, pathB ? (1U << 25) : (1U << 29), (uint32_t)(((y * (int64_t)old) >> 7) & 1));
+    if (txOnly) return;
+    setBBReg(rxImb, 0x3FF, (uint32_t)result[cand][base + 2]);
+    setBBReg(rxImb, 0xFC00, (uint32_t)(result[cand][base + 3] & 0x3F));
+    if (!pathB) setBBReg(0xCA0, 0xF0000000, (uint32_t)((result[cand][3] >> 6) & 0xF));
+}
+
+// Returns a bitmask: bit0 path A (S1) calibrated, bit1 path B (S0) calibrated.
+uint32_t RTL8723BE::iqCalibrate() {
+    long result[4][8];
+    memset(result, 0, sizeof(result));
+    uint32_t pathSel = mmio_read32(0x948);
+    uint8_t finalCand = 0xFF;
+
+    for (uint8_t i = 0; i < 3; ++i) {
+        iqkRun(result, i);
+        if (i == 1 && iqkSimilar(result, 0, 1)) { finalCand = 0; break; }
+        if (i == 2) {
+            if (iqkSimilar(result, 0, 2)) { finalCand = 0; break; }
+            if (iqkSimilar(result, 1, 2)) {
+                finalCand = 1;
+            } else {
+                long sum = 0;
+                for (int k = 0; k < 8; ++k) sum += result[3][k];
+                finalCand = sum ? 3 : 0xFF;
+            }
+        }
+    }
+
+    uint32_t ok = 0;
+    if (finalCand != 0xFF) {
+        if (result[finalCand][0]) { iqkFill(result, finalCand, false, result[finalCand][2] == 0); ok |= 1; }
+        if (result[finalCand][4]) { iqkFill(result, finalCand, true, result[finalCand][6] == 0); ok |= 2; }
+    }
+    mmio_write32(0x948, pathSel);
+    IOLog("RTL8723BE: IQK candidate %u: A tx(%03lx,%03lx) rx(%03lx,%03lx) B tx(%03lx,%03lx) rx(%03lx,%03lx)\n",
+          finalCand,
+          finalCand < 4 ? result[finalCand][0] : 0, finalCand < 4 ? result[finalCand][1] : 0,
+          finalCand < 4 ? result[finalCand][2] : 0, finalCand < 4 ? result[finalCand][3] : 0,
+          finalCand < 4 ? result[finalCand][4] : 0, finalCand < 4 ? result[finalCand][5] : 0,
+          finalCand < 4 ? result[finalCand][6] : 0, finalCand < 4 ? result[finalCand][7] : 0);
+    return ok;
+}
+
+// Linux rtl8723be_phy_set_bw_mode_callback() for HT20
+void RTL8723BE::setBandwidth20() {
+    mmio_write8(REG_BWOPMODE, mmio_read8(REG_BWOPMODE) | 0x04);
+    setBBReg(RFPGA0_RFMOD, 0x1, 0x0);
+    setBBReg(RFPGA1_RFMOD, 0x1, 0x0);
+    fRFChnlVal = (fRFChnlVal & 0xFFFFF3FFU) | (1U << 10) | (1U << 11);
+    setRFReg(RF_CHNLBW, 0xFFFFF, fRFChnlVal);
+}
+
+void RTL8723BE::setTxPowerIndex(uint8_t cck, uint8_t ofdm) {
+    if (cck > 0x3F) cck = 0x3F;
+    if (ofdm > 0x3F) ofdm = 0x3F;
+    // CCK 1M / 2M / 5.5M / 11M
+    setBBReg(RTXAGC_A_CCK1_MCS32, 0x0000FF00U, cck);
+    setBBReg(RTXAGC_B_CCK11_A_CCK2_11, 0xFFFFFF00U, (uint32_t)cck | ((uint32_t)cck << 8) | ((uint32_t)cck << 16));
+    // OFDM 6..54M and HT MCS0..7
+    uint32_t o = (uint32_t)ofdm * 0x01010101U;
+    mmio_write32(RTXAGC_A_RATE18_06, o);
+    mmio_write32(RTXAGC_A_RATE54_24, o);
+    mmio_write32(RTXAGC_A_MCS03_MCS00, o);
+    mmio_write32(RTXAGC_A_MCS07_MCS04, o);
+}
+
+bool RTL8723BE::setChannel(uint8_t channel) {
     if (channel < 1 || channel > 14) return false;
 
-    // Preserve bits [19:12] = 0x17000 (VCO/PLL & RX Baseband Filter enable) in RF_CHNLBW (0x18)!
-    // Clearing bits [19:12] shuts down the 2.4 GHz VCO and RX LPF!
-    uint32_t rf_data = 0x00017000U | (channel & 0x3FFU);
-    if (bw == 0) { // 20 MHz bandwidth (bits [11:10] = 0x3 = 0xC00)
-        rf_data |= (1U << 10) | (1U << 11);
-    } else {       // 40 MHz bandwidth (bits [11:10] = 0x1 = 0x400)
-        rf_data |= (1U << 10);
-    }
-    writeRFRegister(0x18, rf_data);
-    IODelay(1000); // PLL lock delay
+    // eFuse channel groups (Linux _rtl8723be_get_chnl_group)
+    uint8_t group = channel <= 2 ? 0 : channel <= 5 ? 1 : channel <= 8 ? 2 : channel <= 11 ? 3 : 4;
+    uint8_t cck = fCalib.tx_pwr_cck[channel == 14 ? 5 : group];
+    int ofdmDiff = (int8_t)((fCalib.tx_pwr_ht20_diff & 0x0F) << 4) >> 4;
+    int ofdm = (int)fCalib.tx_pwr_ht40[group] + (fCalib.tx_pwr_ht20_diff == 0xFF ? 0 : ofdmDiff);
+    if (ofdm < 0) ofdm = 0;
+    setTxPowerIndex(cck, (uint8_t)ofdm);
 
+    fRFChnlVal = (fRFChnlVal & 0xFFFFFC00U) | channel;
+    setRFReg(RF_CHNLBW, 0xFFFFF, fRFChnlVal);
+    IODelay(10);
     fCurrentChannel = channel;
     return true;
 }
 
-IOReturn RTL8723BE::setAntennaPath(uint8_t ant) {
-    if (ant != 1 && ant != 2) return kIOReturnBadArgument;
-    // Ensure PTA grants RF to Wi-Fi (GNT_WL=1) and BB RFE drivers are enabled
-    mmio_write8(0x0067, mmio_read8(0x0067) | 0x20U);
-    mmio_write8(0x0765, 0x00U);
-    mmio_write8(0x0930, 0x77U);
-    mmio_write32(0x0944, mmio_read32(0x0944) | 0x00000003U);
-    // RTL8723BE Main (#1) vs Aux (#2) SPDT RF switch (0x0948 and 0x092C)
-    mmio_write32(0x0948, (ant == 2) ? 0x00000280U : 0x00000000U);
-    mmio_write32(REG_BB_PAD_CTRL, (ant == 2) ? 0x00000002U : 0x00000001U);
-    // Also re-assert HP wireless LED ON (White) and RCR_AMF
-    mmio_write8(0x004E, (mmio_read8(0x004E) & 0x90U) | 0x20U);
-    mmio_write16(0x06A0, 0xFFFFU);
-    mmio_write32(REG_RCR, 0x00142A0FU);
-    fActiveAntenna = ant;
-    IOLog("RTL8723BE: Switched antenna path to %d (%s)\n",
-          ant, ant == 2 ? "Auxiliary" : "Main");
-    return kIOReturnSuccess;
+void RTL8723BE::refreshLED(bool on) {
+    // LED0 software control (Linux rtl8723be_sw_led_on/off); LED1 kept in sync for HP boards.
+    uint8_t led = mmio_read8(REG_LEDCFG2);
+    if (on) {
+        mmio_write8(REG_LEDCFG2, (uint8_t)(((led & ~0x40) & 0xF0) | 0x20));
+        mmio_write8(REG_LEDCFG1, mmio_read8(REG_LEDCFG1) & 0x10);
+        mmio_write8(REG_LEDCFG0, mmio_read8(REG_LEDCFG0) & 0x70); // verified to light the HP white LED
+    } else {
+        mmio_write8(REG_LEDCFG2, (uint8_t)(((led & 0xF0) & ~0x40) | 0x08 | 0x20));
+        mmio_write8(REG_LEDCFG1, (uint8_t)((mmio_read8(REG_LEDCFG1) & 0x10) | 0x08));
+    }
+}
+
+// Linux _rtl8723be_check_pcie_dma_hang(): 0x350[26] enables the debug port,
+// 0x350[25]/[24] then report an RX/TX DMA hang.
+static bool pcieDmaHung(RTL8723BE *me) {
+    uint8_t tmp = me->mmio_read8(0x0350 + 3);
+    if (!(tmp & 0x04)) {
+        me->mmio_write8(0x0350 + 3, tmp | 0x04);
+        IOSleep(100);
+    }
+    tmp = me->mmio_read8(0x0350 + 3);
+    return (tmp & 0x03) != 0;
+}
+
+// Linux _rtl8723be_reset_pcie_interface_dma()
+static void resetPcieDma(RTL8723BE *me, bool macPowerOn) {
+    me->mmio_write8(REG_RSV_CTRL, me->mmio_read8(REG_RSV_CTRL) & ~0x03);
+    me->mmio_write8(0x00CC, me->mmio_read8(0x00CC) | 0x04);          // PMC_DBG_CTRL2 unlock
+
+    uint8_t rxdma = me->mmio_read8(REG_RXDMA_CONTROL);
+    bool releaseRxPause = !(rxdma & 0x04);
+    if (releaseRxPause) me->mmio_write8(REG_RXDMA_CONTROL, rxdma | 0x04);
+    uint8_t dmaPause = me->mmio_read8(REG_PCIE_CTRL_REG + 1);
+    if (dmaPause != 0xFF) me->mmio_write8(REG_PCIE_CTRL_REG + 1, 0xFF);
+
+    if (macPowerOn) me->mmio_write8(REG_CR, 0);
+    me->mmio_write8(REG_SYS_FUNC_EN + 1, me->mmio_read8(REG_SYS_FUNC_EN + 1) & ~0x01);
+    me->mmio_write8(REG_SYS_FUNC_EN + 1, me->mmio_read8(REG_SYS_FUNC_EN + 1) | 0x01);
+    if (macPowerOn) me->mmio_write8(REG_CR, 0xFF);
+
+    me->mmio_write8(0x00F8 + 2, me->mmio_read8(0x00F8 + 2) | 0x02); // MAC_PHY_CTRL_NORMAL autoload-down
+    if (!macPowerOn) {
+        if (releaseRxPause) me->mmio_write8(REG_RXDMA_CONTROL, me->mmio_read8(REG_RXDMA_CONTROL) & ~0x04);
+        me->mmio_write8(REG_PCIE_CTRL_REG + 1, dmaPause);
+    }
+    me->mmio_write8(0x00CC, me->mmio_read8(0x00CC) & ~0x04);
+}
+
+// Linux rtl8723be_hw_init()
+bool RTL8723BE::hwInit() {
+    uint8_t cr = mmio_read8(REG_CR);
+    bool macOn = (cr != 0 && cr != 0xEA);
+    if (pcieDmaHung(this)) {
+        IOLog("RTL8723BE: PCIe DMA hang detected on entry; resetting DMA engine\n");
+        resetPcieDma(this, macOn);
+        macOn = false;
+    }
+    if (macOn) {
+        // MAC was left running (previous driver instance or firmware); start from a clean state.
+        IOLog("RTL8723BE: MAC active on entry (CR=0x%02x); powering off first\n", cr);
+        powerOff();
+    }
+
+    if (!initMac()) return false;
+    fInitStage = kStageMac;
+
+    if (!fCalib.autoload_ok) {
+        // The chip may have been in power-down when start() first read the eFuse.
+        if (readEfuse(fCalib)) {
+            memcpy(fMyMAC, fCalib.mac_addr, 6);
+            if (!fAntennaForced) {
+                fAntNum = (fCalib.bt_setting & 0x01) ? 2 : 1;
+                fActiveAntenna = (fAntNum == 1 && (fCalib.bt_setting & 0x40)) ? 2 : 1;
+            }
+            IOLog("RTL8723BE: eFuse re-read after power-on: MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+                  fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5]);
+        }
+    }
+
+    mmio_write8(REG_SYS_CFG, mmio_read8(REG_SYS_CFG) & 0x7F);
+
+    // Default to v36 like Linux; rtl8723be_fw=15 selects the older embedded v15 image.
+    int fwSel = 36;
+    PE_parse_boot_argn("rtl8723be_fw", &fwSel, sizeof(fwSel));
+    const uint8_t *fw = (fwSel == 15) ? rtl8723befw_bin : rtl8723befw36_bin;
+    size_t fwLen = (fwSel == 15) ? rtl8723befw_bin_len : rtl8723befw36_bin_len;
+    fLastHmeBox = 0;
+    if (downloadFirmware(fw, fwLen)) {
+        IOLog("RTL8723BE: firmware v%u.%u running\n", fFwVersion, fFwSubVersion);
+    } else {
+        // Linux continues without firmware; RX/scan do not depend on it.
+        IOLog("RTL8723BE: firmware not ready; continuing without it\n");
+    }
+    fInitStage = kStageFirmware;
+
+    phyMacConfig();
+    mmio_write32(REG_RCR, RTL8723BE_RCR_DEFAULT);
+    fInitStage = kStageMacTable;
+
+    phyBBConfig();
+    fInitStage = kStageBB;
+
+    phyRFConfig();
+    fRFChnlVal = getRFReg(RF_CHNLBW, 0xFFFFF);
+    fRFChnlVal = (fRFChnlVal & 0xFFF03FFU) | (1U << 10) | (1U << 11);
+    fInitStage = kStageRF;
+
+    hwConfigure();
+    mmio_write32(REG_CAMCMD, 0xC0000000U);   // invalidate + clear all CAM entries
+    mmio_write16(REG_SECCFG, 0x0000);        // software crypto only
+    for (int i = 0; i < 6; ++i) mmio_write8(REG_MACID + i, fMyMAC[i]);
+
+    btcoexInit();
+    lcCalibrate();
+    mmio_write8(REG_NAV_UPPER, (uint8_t)((30000 + 127) / 128));
+
+    // Release RX DMA and TX/RX PCIe DMA.
+    uint8_t rxdma = mmio_read8(REG_RXDMA_CONTROL);
+    if (rxdma & 0x04) mmio_write8(REG_RXDMA_CONTROL, rxdma & ~0x04);
+    mmio_write8(REG_PCIE_CTRL_REG + 1, 0x00);
+
+    // Station, no link: accept beacons from every BSS.
+    mmio_write8(REG_MSR, (uint8_t)(mmio_read8(REG_MSR) & 0xFC));
+    for (int i = 0; i < 6; ++i) mmio_write8(REG_BSSID + i, 0);
+    mmio_write32(REG_RCR, mmio_read32(REG_RCR) & ~(RCR_CBSSID_BCN | RCR_CBSSID_DATA));
+    mmio_write16(REG_RXFLTMAP0, 0xFFFF);
+    mmio_write16(REG_RXFLTMAP2, 0xFFFF);
+
+    setBandwidth20();
+    setChannel(1);
+    fInitStage = kStageConfigured;
+
+    fHwReady = true;
+    fInitStage = kStageReady;
+    return true;
 }
 
 // ============================================================================
-// Multi-Queue DMA Ring Architecture (256-Byte Aligned)
+// Multi-Queue DMA Ring Architecture
 // ============================================================================
 
 bool RTL8723BE::initDMARings() {
     const RTLQueueId queues[] = { Q_BK, Q_BE, Q_VI, Q_VO, Q_BCN, Q_MGNT, Q_HIGH };
 
-    // 1. Allocate TX Rings (STRICT 32-bit < 4GB physical address mask 0x00000000FFFFFF00ULL for 32-bit PCIe DMA engine)
     for (RTLQueueId q : queues) {
         size_t idx = (size_t)q;
-        fTxHostIdx[idx] = 0;
-
-        fTxRingDescMem[idx] = allocateDMA(RTL8723BE_TX_DESC_COUNT * sizeof(TxDescPci), 256);
-        if (!fTxRingDescMem[idx]) return false;
-
-        fTxRingDescVirt[idx] = (TxDescPci*)fTxRingDescMem[idx]->getBytesNoCopy();
-        fTxRingDescPhys[idx] = fTxRingDescMem[idx]->getPhysicalAddress();
-        memset(fTxRingDescVirt[idx], 0, RTL8723BE_TX_DESC_COUNT * sizeof(TxDescPci));
-
-        // Allocate TX packet data buffers (< 4GB physical mask)
+        if (!allocDMA(fTxRing[idx], RTL8723BE_TX_DESC_COUNT * sizeof(TxDescPci), 256)) return false;
+        fTxRingDescVirt[idx] = (TxDescPci*)fTxRing[idx].virt;
         for (int i = 0; i < RTL8723BE_TX_DESC_COUNT; ++i) {
-            fTxBufMem[idx][i] = allocateDMA(RTL8723BE_TX_BUF_SIZE, 4);
-            if (!fTxBufMem[idx][i]) return false;
-
-            fTxRingDescVirt[idx][i].set_buffer_addr((uint32_t)(fTxBufMem[idx][i]->getPhysicalAddress() & 0xFFFFFFFFULL));
-            fTxRingDescVirt[idx][i].set_next_addr(fTxRingDescPhys[idx] +
-                (size_t(i + 1) % RTL8723BE_TX_DESC_COUNT) * sizeof(TxDescPci));
-            fTxRingDescVirt[idx][i].set_own(false);
+            if (!allocDMA(fTxBuf[idx][i], RTL8723BE_TX_BUF_SIZE, 4)) return false;
         }
     }
-
-    // 2. Allocate RX Ring (< 4GB 256-byte aligned physical mask)
-    fRxHostIdx = 0;
-    fRxRingDescMem = allocateDMA(RTL8723BE_RX_DESC_COUNT * sizeof(RxDesc32), 256);
-    if (!fRxRingDescMem) return false;
-
-    fRxRingDescVirt = (RxDesc32*)fRxRingDescMem->getBytesNoCopy();
-    fRxRingDescPhys = fRxRingDescMem->getPhysicalAddress();
-    memset(fRxRingDescVirt, 0, RTL8723BE_RX_DESC_COUNT * sizeof(RxDesc32));
-
-    // Allocate RX packet buffers (< 4GB physical mask)
+    if (!allocDMA(fRxRing, RTL8723BE_RX_DESC_COUNT * sizeof(RxDesc32), 256)) return false;
+    fRxRingDescVirt = (RxDesc32*)fRxRing.virt;
     for (int i = 0; i < RTL8723BE_RX_DESC_COUNT; ++i) {
-        fRxBufMem[i] = allocateDMA(RTL8723BE_RX_BUF_SIZE, 4);
-        if (!fRxBufMem[i]) return false;
-
-        fRxRingDescVirt[i].dw0 = 0;
-        fRxRingDescVirt[i].set_length(RTL8723BE_RX_BUF_SIZE);
-        fRxRingDescVirt[i].set_buffer_addr((uint32_t)(fRxBufMem[i]->getPhysicalAddress() & 0xFFFFFFFFULL));
-        if (i == (RTL8723BE_RX_DESC_COUNT - 1)) {
-            fRxRingDescVirt[i].set_eor(true); // End of Ring flag
-        }
-        fRxRingDescVirt[i].set_own(true); // Owned by hardware, ready to receive
+        if (!allocDMA(fRxBuf[i], RTL8723BE_RX_BUF_SIZE, 8)) return false;
     }
-
-    OSSynchronizeIO();
-    // 3. Program MMIO DESA registers
-    mmio_write32(REG_BKQ_DESA, (uint32_t)(fTxRingDescPhys[Q_BK] & 0xFFFFFFFFULL));
-    mmio_write32(REG_BEQ_DESA, (uint32_t)(fTxRingDescPhys[Q_BE] & 0xFFFFFFFFULL));
-    mmio_write32(REG_VIQ_DESA, (uint32_t)(fTxRingDescPhys[Q_VI] & 0xFFFFFFFFULL));
-    mmio_write32(REG_VOQ_DESA, (uint32_t)(fTxRingDescPhys[Q_VO] & 0xFFFFFFFFULL));
-    mmio_write32(REG_BCNQ_DESA, (uint32_t)(fTxRingDescPhys[Q_BCN] & 0xFFFFFFFFULL));
-    mmio_write32(REG_MGQ_DESA, (uint32_t)(fTxRingDescPhys[Q_MGNT] & 0xFFFFFFFFULL));
-    mmio_write32(REG_HQ_DESA, (uint32_t)(fTxRingDescPhys[Q_HIGH] & 0xFFFFFFFFULL));
-    mmio_write32(REG_RX_DESA, (uint32_t)(fRxRingDescPhys & 0xFFFFFFFFULL));
-
-    const uint32_t ringRegisters[] = {REG_BKQ_DESA, REG_BEQ_DESA, REG_VIQ_DESA,
-        REG_VOQ_DESA, REG_BCNQ_DESA, REG_MGQ_DESA, REG_HQ_DESA, REG_RX_DESA};
-    for (uint32_t reg : ringRegisters) mmio_write32(reg + 4, 0);
-
-    // 4. Configure Interrupt Mitigation (4 packets threshold, 128 us timer)
-    mmio_write32(REG_INT_MIG, (4U << 8) | 4U);
-
+    resetRings();
     return true;
+}
+
+// Linux _rtl_pci_init_trx_ring / rtl_pci_reset_trx_ring equivalent.
+void RTL8723BE::resetRings() {
+    for (int q = 0; q < 8; ++q) {
+        fTxHostIdx[q] = 0;
+        if (!fTxRingDescVirt[q]) continue;
+        memset(fTxRingDescVirt[q], 0, RTL8723BE_TX_DESC_COUNT * sizeof(TxDescPci));
+        for (int i = 0; i < RTL8723BE_TX_DESC_COUNT; ++i) {
+            fTxRingDescVirt[q][i].set_next_addr(fTxRing[q].ioaddr +
+                (size_t(i + 1) % RTL8723BE_TX_DESC_COUNT) * sizeof(TxDescPci));
+        }
+    }
+    fRxHostIdx = 0;
+    if (fRxRingDescVirt) {
+        memset(fRxRingDescVirt, 0, RTL8723BE_RX_DESC_COUNT * sizeof(RxDesc32));
+        for (int i = 0; i < RTL8723BE_RX_DESC_COUNT; ++i) {
+            RxDesc32 &d = fRxRingDescVirt[i];
+            d.set_buffer_addr(fRxBuf[i].ioaddr);
+            d.set_length(RTL8723BE_RX_BUF_SIZE);
+            if (i == RTL8723BE_RX_DESC_COUNT - 1) d.set_eor(true);
+            OSSynchronizeIO();
+            d.set_own(true);
+        }
+    }
+    OSSynchronizeIO();
 }
 
 void RTL8723BE::freeDMARings() {
     for (int q = 0; q < 8; ++q) {
-        for (int i = 0; i < RTL8723BE_TX_DESC_COUNT; ++i) {
-            if (fTxBufMem[q][i]) {
-                fTxBufMem[q][i]->complete(kIODirectionInOut);
-                fTxBufMem[q][i]->release();
-                fTxBufMem[q][i] = nullptr;
-            }
-        }
-        if (fTxRingDescMem[q]) {
-            fTxRingDescMem[q]->complete(kIODirectionInOut);
-            fTxRingDescMem[q]->release();
-            fTxRingDescMem[q] = nullptr;
-            fTxRingDescVirt[q] = nullptr;
-            fTxRingDescPhys[q] = 0;
-        }
+        for (int i = 0; i < RTL8723BE_TX_DESC_COUNT; ++i) freeDMA(fTxBuf[q][i]);
+        freeDMA(fTxRing[q]);
+        fTxRingDescVirt[q] = nullptr;
     }
-
-    for (int i = 0; i < RTL8723BE_RX_DESC_COUNT; ++i) {
-        if (fRxBufMem[i]) {
-            fRxBufMem[i]->complete(kIODirectionInOut);
-            fRxBufMem[i]->release();
-            fRxBufMem[i] = nullptr;
-        }
-    }
-
-    if (fRxRingDescMem) {
-        fRxRingDescMem->complete(kIODirectionInOut);
-        fRxRingDescMem->release();
-        fRxRingDescMem = nullptr;
-        fRxRingDescVirt = nullptr;
-        fRxRingDescPhys = 0;
-    }
+    for (int i = 0; i < RTL8723BE_RX_DESC_COUNT; ++i) freeDMA(fRxBuf[i]);
+    freeDMA(fRxRing);
+    fRxRingDescVirt = nullptr;
 }
 
-bool RTL8723BE::transmitRawFrame(RTLQueueId qId, const uint8_t *frame, size_t len) {
-    if (!frame || len == 0 || len > RTL8723BE_TX_BUF_SIZE) return false;
+// Fill a TX descriptor the way Linux rtl8723be_tx_fill_desc() does for a single-segment frame.
+// `frame` must not include the FCS; the MAC appends it.
+bool RTL8723BE::transmitRawFrame(RTLQueueId qId, const uint8_t *frame, size_t len, uint8_t rate) {
     size_t qIdx = (size_t)qId;
-    if (qIdx >= 8 || !fTxRingDescVirt[qIdx] || !fTxBufMem[qIdx][fTxHostIdx[qIdx]]) {
+    if (!frame || len < 10 || len > RTL8723BE_TX_BUF_SIZE || qIdx >= 8 ||
+        !fTxRingDescVirt[qIdx] || !fHwReady) {
         return false;
     }
 
-    TxDescPci *desc = &fTxRingDescVirt[qIdx][fTxHostIdx[qIdx]];
-    if (desc->get_own()) {
-        // Ring full (backpressure)
+    IOLockLock(fTxLock);
+    uint16_t slot = fTxHostIdx[qIdx];
+    TxDescPci *desc = &fTxRingDescVirt[qIdx][slot];
+    if (desc->get_own() || !fTxBuf[qIdx][slot].virt) {
+        fTxRingFull++;
+        IOLockUnlock(fTxLock);
         return false;
     }
 
-    uint8_t *buf = (uint8_t*)fTxBufMem[qIdx][fTxHostIdx[qIdx]]->getBytesNoCopy();
-    if (frame && len > 0) {
-        memcpy(buf, frame, len);
-    }
+    memcpy(fTxBuf[qIdx][slot].virt, frame, len);
 
-    desc->set_pktsize((uint16_t)len);
+    const uint16_t fc = (uint16_t)(frame[0] | (frame[1] << 8));
+    const bool isData = ((fc >> 2) & 0x3) == 2;
+    const bool isQoS = isData && (fc & 0x0080);
+    const bool multicast = (frame[4] & 0x01) != 0;
+
+    uint64_t nextAddr = desc->get_next_addr();
+    memset(desc, 0, sizeof(*desc));
+    desc->set_next_addr(nextAddr);
     desc->set_offset(RTL_TX_HEADER_SIZE);
-    desc->set_buffer_size((uint16_t)len);
+    desc->set_pktsize((uint16_t)len);
     desc->set_firstseg(true);
     desc->set_lastseg(true);
+    desc->set_bmc(multicast);
     desc->set_queuesel(rtlTxQueueSelect(qId));
+    desc->set_macid(0);
+    desc->set_use_rate(true);
+    desc->set_tx_rate(rate);
+    desc->set_data_rate_fb_limit(0x1F);
+    desc->set_rts_rate_fb_limit(0xF);
+    if (!isData) {
+        desc->set_rate_id(7);           // RATR_INX_WIRELESS_MC
+        desc->set_disable_fb(true);
+    } else {
+        desc->set_rate_id(4);           // RATR_INX_WIRELESS_GB
+    }
+    if (!isQoS) {
+        desc->set_hwseq_en(true);       // hardware assigns the sequence number
+    } else {
+        desc->set_seq(fTxSeq++);
+    }
+    desc->set_buffer_size((uint16_t)len);
+    desc->set_buffer_addr(fTxBuf[qIdx][slot].ioaddr);
     OSSynchronizeIO();
     desc->set_own(true);
-    OSSynchronizeIO(); // Relinquish to DMA
+    OSSynchronizeIO();
 
-    // Trigger Doorbell
-    uint16_t doorbell = (uint16_t)(1U << (uint8_t)qId);
-    mmio_write16(REG_PCIE_CTRL_REG, doorbell);
+    // Doorbell (Linux rtl8723be_tx_polling)
+    mmio_write16(REG_PCIE_CTRL_REG, (uint16_t)(qId == Q_BCN ? (1U << 4) : (1U << (uint8_t)qId)));
 
-    fTxHostIdx[qIdx] = (fTxHostIdx[qIdx] + 1) % RTL8723BE_TX_DESC_COUNT;
+    fTxHostIdx[qIdx] = (uint16_t)((slot + 1) % RTL8723BE_TX_DESC_COUNT);
     fTxPackets++;
+    IOLockUnlock(fTxLock);
     return true;
 }
 
 // ============================================================================
-// Interrupt Handling (Storm-Proof MSI / Shared INTx Filter)
+// Interrupt Handling
 // ============================================================================
 
+void RTL8723BE::enableInterrupts() {
+    if (!fMMIOBase) return;
+    mmio_write32(REG_HISR, 0xFFFFFFFFU);
+    mmio_write32(REG_HISRE, 0xFFFFFFFFU);
+    // Only the sources this driver services; HSISR/C2H/PS timeout stay masked.
+    fHIMRMask = IMR_ROK | IMR_RDU | IMR_VODOK | IMR_VIDOK | IMR_BEDOK | IMR_BKDOK |
+                IMR_MGNTDOK | IMR_HIGHDOK;
+    fInterruptEnabled = true;
+    mmio_write32(REG_HIMR, fHIMRMask);
+    mmio_write32(REG_HIMRE, RTL8723BE_IMRE_DEFAULT);
+}
+
+void RTL8723BE::disableInterrupts() {
+    fInterruptEnabled = false;
+    fHIMRMask = 0;
+    if (!fMMIOBase) return;
+    mmio_write32(REG_HIMR, 0);
+    mmio_write32(REG_HIMRE, 0);
+}
+
 bool RTL8723BE::interruptFilter(OSObject *owner, IOFilterInterruptEventSource *src) {
+    (void)src;
     RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
     if (!me || !me->fMMIOBase || !me->fInterruptEnabled || me->fHIMRMask == 0) {
         return false;
     }
 
     uint32_t hisr = me->mmio_read32(REG_HISR);
-    // Guard against PCIe D2/D3/L1 bus float (0xFFFFFFFF) and unrelated shared IRQ lines
-    if (hisr == 0 || hisr == 0xFFFFFFFFU) {
+    if (hisr == 0xFFFFFFFFU) {
         return false;
     }
-
     uint32_t active = hisr & me->fHIMRMask;
-    if (active == 0) {
+    uint32_t hisre = me->mmio_read32(REG_HISRE) & RTL8723BE_IMRE_DEFAULT;
+    if (active == 0 && hisre == 0) {
         return false;
     }
 
-    // Mask REG_HIMR immediately in primary interrupt context so level-triggered INTx cannot storm
+    // Mask until the work loop has drained the rings, then acknowledge (W1C).
     me->mmio_write32(REG_HIMR, 0);
-    // Acknowledge active interrupts (Write-1-to-Clear)
     me->mmio_write32(REG_HISR, active);
-
-    return true; // Schedule interruptAction on workloop
+    if (hisre) me->mmio_write32(REG_HISRE, hisre);
+    me->fIntCount++;
+    return true;
 }
 
 void RTL8723BE::interruptAction(OSObject *owner, IOInterruptEventSource *src, int count) {
+    (void)src;
+    (void)count;
     RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
     if (!me || !me->fMMIOBase) return;
 
     me->handleRxInterrupt();
     me->handleTxInterrupt();
 
-    // Re-unmask hardware interrupts now that workloop processing is complete
     if (me->fInterruptEnabled && me->fHIMRMask != 0) {
         me->mmio_write32(REG_HIMR, me->fHIMRMask);
     }
 }
 
-void RTL8723BE::handleRxInterrupt() {
-    if (!fRxRingDescVirt) return;
+// Signal strength in dBm from the PHY status report (Linux _rtl8723be_query_rxphystatus).
+int8_t RTL8723BE::rxSignalDbm(const RxDesc32 *desc, const uint8_t *phy) {
+    if (!desc->get_physt() || desc->get_drv_infosize() < 1) return -100;
+    if (desc->get_rxmcs() < DESC_RATE6M) {
+        uint8_t agc = phy[5];
+        uint8_t lna = (agc & 0xE0) >> 5;
+        uint8_t vga = agc & 0x1F;
+        int pwr;
+        switch (lna) {
+        case 6: pwr = -34 - 2 * vga; break;
+        case 4: pwr = -14 - 2 * vga; break;
+        case 1: pwr = 6 - 2 * vga; break;
+        case 0: pwr = 16 - 2 * vga; break;
+        default: pwr = -100; break;
+        }
+        return (int8_t)(pwr < -100 ? -100 : pwr > 0 ? 0 : pwr);
+    }
+    int pwr = ((phy[4] >> 1) & 0x7F) - 110;
+    return (int8_t)(pwr < -100 ? -100 : pwr > 0 ? 0 : pwr);
+}
 
-    // Strict bounded loop (maximum 64 descriptors per pass) to prevent workloop starvation
-    int budget = RTL8723BE_RX_DESC_COUNT;
-    while (budget-- > 0) {
+void RTL8723BE::handleRxInterrupt() {
+    if (!fRxRingDescVirt || !fHwReady) return;
+
+    for (int budget = RTL8723BE_RX_DESC_COUNT; budget > 0; --budget) {
         RxDesc32 *desc = &fRxRingDescVirt[fRxHostIdx];
         if (desc->get_own()) {
-            break; // Still owned by DMA
-        }
-
-        OSSynchronizeIO(); // DMA relinquished ownership before CPU reads payload.
-        uint16_t len = desc->get_length();
-        size_t shift = desc->get_shift() + 8U * desc->get_drv_infosize();
-        const uint8_t *src = (const uint8_t*)fRxBufMem[fRxHostIdx]->getBytesNoCopy();
-
-        if (src && len > 0 && !desc->get_crc32_err() && !desc->get_icv_err()) {
-            size_t hdr_off = shift;
-            auto is80211Hdr = [](uint8_t fc0) -> bool {
-                return (fc0 & 0x03U) == 0 &&
-                       (fc0 == 0x80U || fc0 == 0x50U || fc0 == 0xB0U ||
-                        fc0 == 0x10U || fc0 == 0x30U || fc0 == 0xC0U ||
-                        fc0 == 0xA0U || (fc0 & 0x0CU) == 0x08U);
-            };
-            if ((hdr_off + len) > RTL8723BE_RX_BUF_SIZE || !is80211Hdr(src[hdr_off])) {
-                const size_t candidates[] = { 32U, 0U, 24U + shift, 56U };
-                for (size_t c : candidates) {
-                    if ((c + len) <= RTL8723BE_RX_BUF_SIZE && is80211Hdr(src[c])) {
-                        hdr_off = c;
-                        break;
-                    }
-                }
-            }
-            if ((hdr_off + len) <= RTL8723BE_RX_BUF_SIZE) {
-                processRxFrame(src + hdr_off, len);
-                fRxPackets++;
-            }
-        } else if (desc->get_crc32_err()) {
-            fRxErrors++;
-        }
-
-        // Re-arm descriptor for DMA, explicitly restoring EOR on final slot and pktsize!
-        bool is_last = (fRxHostIdx == (RTL8723BE_RX_DESC_COUNT - 1));
-        desc->dw0 = 0;
-        desc->set_length(RTL8723BE_RX_BUF_SIZE);
-        if (is_last) {
-            desc->set_eor(true);
+            break; // still owned by the NIC
         }
         OSSynchronizeIO();
-        desc->set_own(true);
+        fRxDescDone++;
 
-        fRxHostIdx = is_last ? 0 : (fRxHostIdx + 1);
+        // Buffer layout (rtl_pci_rx_interrupt): [drv_info * 8][shift][802.11 frame incl. FCS]
+        const uint8_t *buf = (const uint8_t*)fRxBuf[fRxHostIdx].virt;
+        size_t hdrOff = (size_t)desc->get_drv_infosize() * 8 + desc->get_shift();
+        size_t len = desc->get_length();
+
+        const uint8_t rate = desc->get_rxmcs();
+        const int mod = rate < DESC_RATE6M ? 0 : (rate <= DESC_RATE54M ? 1 : 2);
+        fCurRxRate = rate;
+        if (desc->get_crc32_err()) {
+            fRxCrc[mod]++;
+            fRxErrors++;
+        } else if (desc->get_icv_err()) {
+            fRxDropped++;
+        } else if (buf && len >= 14 && hdrOff + len <= RTL8723BE_RX_BUF_SIZE) {
+            fRxOk[mod]++;
+            int8_t rssi = rxSignalDbm(desc, buf);
+            processRxFrame(buf + hdrOff, len - 4, rssi);   // RCR_APPFCS: drop the FCS
+            fRxPackets++;
+        } else {
+            fRxDropped++;
+        }
+
+        bool isLast = (fRxHostIdx == RTL8723BE_RX_DESC_COUNT - 1);
+        desc->dw0 = 0;
+        desc->set_length(RTL8723BE_RX_BUF_SIZE);
+        desc->set_buffer_addr(fRxBuf[fRxHostIdx].ioaddr);
+        if (isLast) desc->set_eor(true);
+        OSSynchronizeIO();
+        desc->set_own(true);
+        OSSynchronizeIO();
+        fRxHostIdx = isLast ? 0 : (uint16_t)(fRxHostIdx + 1);
     }
 }
 
 void RTL8723BE::handleTxInterrupt() {
-    // Reclaim finished TX descriptors across queues
+    // Descriptors are recycled lazily in transmitRawFrame() via the OWN bit.
 }
 
 // ============================================================================
-// 802.11 Protocol & Scanner Engine
+// Scanner (runs on the work loop; the user-client thread sleeps on the gate)
 // ============================================================================
 
-bool RTL8723BE::parseBeaconOrProbe(const uint8_t *frame, size_t len, RTL8723BEDiscoveredAP &outAP) {
-    if (!frame || len < 36) return false;
+void RTL8723BE::sendProbeRequest() {
+    static const uint8_t rates[] = {0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24};
+    static const uint8_t extRates[] = {0x32, 0x04, 0x30, 0x48, 0x60, 0x6C};
+    uint8_t *f = fTxFrame;
+    size_t pos = 0;
+    f[pos++] = 0x40; f[pos++] = 0x00;           // Probe Request
+    f[pos++] = 0x00; f[pos++] = 0x00;           // duration
+    memset(f + pos, 0xFF, 6); pos += 6;         // DA broadcast
+    memcpy(f + pos, fMyMAC, 6); pos += 6;       // SA
+    memset(f + pos, 0xFF, 6); pos += 6;         // BSSID wildcard
+    f[pos++] = 0x00; f[pos++] = 0x00;           // sequence (hardware)
+    f[pos++] = 0x00; f[pos++] = 0x00;           // wildcard SSID
+    memcpy(f + pos, rates, sizeof(rates)); pos += sizeof(rates);
+    memcpy(f + pos, extRates, sizeof(extRates)); pos += sizeof(extRates);
+    f[pos++] = 0x03; f[pos++] = 0x01; f[pos++] = fScanCurrentChannel; // DS parameter set
+    transmitRawFrame(Q_MGNT, f, pos, DESC_RATE1M);
+}
 
-    uint8_t fc_subtype = (frame[0] >> 4) & 0x0F;
-    if (fc_subtype != 8 && fc_subtype != 5) return false;
+void RTL8723BE::scanStep() {
+    handleRxInterrupt();   // also poll, in case MSI delivery is delayed
 
-    memcpy(outAP.bssid, frame + 16, 6);
-    outAP.beacon_interval = (uint16_t)(frame[32] | (((uint16_t)frame[33]) << 8));
-    outAP.capabilities = (uint16_t)(frame[34] | (((uint16_t)frame[35]) << 8));
-    outAP.is_wpa2 = (outAP.capabilities & 0x0010) != 0;
-    outAP.channel = fCurrentChannel;
-    outAP.rssi = -50;
-    memset(outAP.ssid, 0, sizeof(outAP.ssid));
-
-    size_t offset = 36;
-    while (offset + 1 < (len - 4)) {
-        uint8_t tag = frame[offset];
-        uint8_t tag_len = frame[offset + 1];
-        offset += 2;
-        if (offset + tag_len > (len - 4)) break;
-
-        if (tag == 0 && tag_len <= RTL8723BE_MAX_SSID_LEN) { // SSID
-            memcpy(outAP.ssid, frame + offset, tag_len);
-            outAP.ssid[tag_len] = '\0';
-        } else if (tag == 3 && tag_len >= 1) { // Channel
-            outAP.channel = frame[offset];
-        } else if (tag == 48) { // RSN IE (WPA2)
-            outAP.is_wpa2 = 1;
+    if (!fScanActive) return;
+    if (fScanCurrentChannel >= 13) {
+        const uint32_t passScore = fRxMgmt - fPassMgmtStart;
+        const bool canSwitch = !fAntennaForced && fState != kRTLStateConnected;
+        if (canSwitch && !fScanRetriedOtherAntenna && (!fAntennaCalibrated || fScanResults.count == 0)) {
+            // The eFuse antenna info on many single-antenna HP boards does not match the wiring
+            // (Linux needs ant_sel= there). Sweep the other internal path too and keep the better one.
+            fScanRetriedOtherAntenna = true;
+            fPass1Score = passScore;
+            fActiveAntenna = (fActiveAntenna == 2) ? 1 : 2;
+            mmio_write32(0x0948, fActiveAntenna == 2 ? 0x280 : 0x0);
+            fPassMgmtStart = fRxMgmt;
+            fScanCurrentChannel = 0;
+        } else {
+            if (canSwitch && fScanRetriedOtherAntenna) {
+                if (fPass1Score > passScore) {
+                    fActiveAntenna = (fActiveAntenna == 2) ? 1 : 2;
+                    mmio_write32(0x0948, fActiveAntenna == 2 ? 0x280 : 0x0);
+                }
+                if (!fAntennaCalibrated) {
+                    IOLog("RTL8723BE: antenna calibration: %s selected (%u vs %u frames)\n",
+                          fActiveAntenna == 2 ? "AUX/S0" : "MAIN/S1",
+                          fPass1Score > passScore ? fPass1Score : passScore,
+                          fPass1Score > passScore ? passScore : fPass1Score);
+                }
+                fAntennaCalibrated = true;
+                if (fActiveAntenna == 2 && fAntNum == 2) {
+                    // The wiring contradicts the eFuse (single antenna on S0): behave like ant_sel=1.
+                    fAntNum = 1;
+                    applyCoexProfile();
+                }
+            }
+            finishScan();
+            return;
         }
-        offset += tag_len;
     }
-
-    return true;
+    fScanCurrentChannel++;
+    setChannel(fScanCurrentChannel);
+    sendProbeRequest();
+    fScanTimer->setTimeoutMS(RTL8723BE_SCAN_DWELL_MS);
 }
 
-IOReturn RTL8723BE::startScan() {
-    if (!fInterruptEnabled) {
-        enable(fNetif);
-    }
-    IOLockLock(fStateLock);
-    fScanActive = true;
-    fScanResults.count = 0;
-    fHomeChannel = fCurrentChannel;
-
-    // Challenger Fix 6: Send Null Data with PM=1 before tuning away if connected
-    if (fState == kRTLStateConnected) {
-        sendNullDataFrame(true);
-        IODelay(10000);
-    }
-
-    // Step channels 1 to 13
-    for (uint8_t ch = 1; ch <= 13; ++ch) {
-        setChannel(ch);
-
-        // Send active probe request
-        uint8_t probe_req[] = {
-            0x40, 0x00, 0x00, 0x00,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // DA: Broadcast
-            fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5], // SA
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // BSSID: Broadcast
-            0x00, 0x00, // Seq
-            0x00, 0x00  // Wildcard SSID IE
-        };
-        transmitRawFrame(Q_MGNT, probe_req, sizeof(probe_req));
-
-        // Dwell 40ms to receive beacons & probe responses
-        IODelay(40000);
-        handleRxInterrupt();
-    }
-
-    // Restore operating channel
+void RTL8723BE::finishScan() {
     setChannel(fHomeChannel);
-
-    // Challenger Fix 6: Send Null Data with PM=0 to wake AP if was connected
     if (fState == kRTLStateConnected) {
         sendNullDataFrame(false);
     }
-
     fScanActive = false;
-    IOLockUnlock(fStateLock);
+    IOLog("RTL8723BE: Scan completed, %u access points discovered (rx desc %u, beacons %u, ints %u)\n",
+          fScanResults.count, fRxDescDone, fRxBeacons, fIntCount);
+    fCommandGate->commandWakeup(&fScanActive);
+}
 
-    IOLog("RTL8723BE: Scan completed, %u access points discovered\n", fScanResults.count);
-    return kIOReturnSuccess;
+void RTL8723BE::scanTimerAction(OSObject *owner, IOTimerEventSource *timer) {
+    (void)timer;
+    RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
+    if (me && me->fHwReady) me->scanStep();
+}
+
+IOReturn RTL8723BE::gatedScan(OSObject *owner, void *, void *, void *, void *) {
+    RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
+    if (!me || !me->fHwReady) return kIOReturnNotReady;
+    if (me->fScanActive) return kIOReturnBusy;
+
+    me->fScanActive = true;
+    me->fScanRetriedOtherAntenna = false;
+    me->fPassMgmtStart = me->fRxMgmt;
+    me->fScanResults.count = 0;
+    me->fHomeChannel = me->fCurrentChannel;
+    me->fScanCurrentChannel = 0;
+    if (me->fState == kRTLStateConnected) {
+        me->sendNullDataFrame(true);
+    }
+    me->scanStep();
+
+    AbsoluteTime deadline;
+    clock_interval_to_deadline(RTL8723BE_SCAN_TIMEOUT_MS * 2, kMillisecondScale, &deadline);
+    while (me->fScanActive) {
+        if (me->fCommandGate->commandSleep(&me->fScanActive, deadline, THREAD_ABORTSAFE) != THREAD_AWAKENED) {
+            break;
+        }
+    }
+    if (me->fScanActive && me->fHwReady) {
+        me->fScanTimer->cancelTimeout();
+        me->finishScan();
+    }
+    return me->fHwReady ? kIOReturnSuccess : kIOReturnNotReady;
+}
+
+IOReturn RTL8723BE::startScan() {
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedScan);
+}
+
+// ============================================================================
+// User-client operations (serialized on the work loop)
+// ============================================================================
+
+IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, void *a3) {
+    RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
+    if (!me) return kIOReturnNotAttached;
+    uintptr_t code = (uintptr_t)op;
+
+    switch (code) {
+    case kOpConnect: {
+        struct Args { const RTL8723BEConnectParams *p; const char *ssid; const char *pass; uint8_t *pmk; };
+        Args *a = (Args *)a1;
+        if (!me->fHwReady) return kIOReturnNotReady;
+        if (me->fState != kRTLStateDisconnected) me->deauthTeardown();
+        strlcpy(me->fConnectedSSID, a->ssid, sizeof(me->fConnectedSSID));
+        memcpy(me->fConnectedBSSID, a->p->bssid, 6);
+        memcpy(me->fPMK, a->pmk, sizeof(me->fPMK));
+        return me->beginConnect();
+    }
+    case kOpDisconnect:
+        me->deauthTeardown();
+        return kIOReturnSuccess;
+    case kOpIQK: {
+        if (!me->fHwReady) return kIOReturnNotReady;
+        if (me->fScanActive) return kIOReturnBusy;
+        uint32_t ok = me->iqCalibrate();
+        *(uint32_t *)a1 = ok;
+        return kIOReturnSuccess;
+    }
+    case kOpScanResults:
+        memcpy(a1, &me->fScanResults, sizeof(RTL8723BEScanResults));
+        return kIOReturnSuccess;
+    case kOpStatus: {
+        RTL8723BEStatus *st = (RTL8723BEStatus *)a1;
+        memset(st, 0, sizeof(*st));
+        st->state = (uint32_t)me->fState;
+        memcpy(st->mac, me->fMyMAC, 6);
+        memcpy(st->bssid, me->fConnectedBSSID, 6);
+        strlcpy(st->ssid, me->fConnectedSSID, sizeof(st->ssid));
+        st->channel = me->fCurrentChannel;
+        st->rssi = -100;
+        for (uint32_t i = 0; i < me->fScanResults.count; ++i) {
+            if (memcmp(me->fScanResults.aps[i].bssid, me->fConnectedBSSID, 6) == 0) {
+                st->rssi = me->fScanResults.aps[i].rssi;
+            }
+        }
+        st->antenna = me->fActiveAntenna;
+        st->tx_packets = me->fTxPackets;
+        st->rx_packets = me->fRxPackets;
+        st->tx_errors = me->fTxErrors;
+        st->rx_errors = me->fRxErrors;
+        return kIOReturnSuccess;
+    }
+    case kOpAntenna: {
+        uint8_t ant = (uint8_t)(uintptr_t)a1;
+        if (ant != 1 && ant != 2) return kIOReturnBadArgument;
+        if (!me->fHwReady) return kIOReturnNotReady;
+        me->fActiveAntenna = ant;
+        me->fAntennaForced = true;
+        me->mmio_write32(0x0948, ant == 2 ? 0x280 : 0x0);
+        if (ant == 2 && me->fAntNum == 2) me->fAntNum = 1;   // single antenna on S0 (ant_sel=1)
+        me->applyCoexProfile();
+        IOLog("RTL8723BE: Wi-Fi RF path set to %s\n", ant == 2 ? "AUX/S0" : "MAIN/S1");
+        return kIOReturnSuccess;
+    }
+    case kOpReadReg: {
+        uint32_t addr = (uint32_t)(uintptr_t)a1, width = (uint32_t)(uintptr_t)a2;
+        uint32_t *out = (uint32_t *)a3;
+        if (addr >= 0x4000 || (addr & (width - 1)) != 0) return kIOReturnBadArgument;
+        if (width == 1) *out = me->mmio_read8(addr);
+        else if (width == 2) *out = me->mmio_read16(addr);
+        else if (width == 4) *out = me->mmio_read32(addr);
+        else return kIOReturnBadArgument;
+        return kIOReturnSuccess;
+    }
+    case kOpWriteReg: {
+        uint32_t addr = (uint32_t)(uintptr_t)a1, width = (uint32_t)(uintptr_t)a2;
+        uint32_t value = (uint32_t)(uintptr_t)a3;
+        if (addr >= 0x4000 || (addr & (width - 1)) != 0) return kIOReturnBadArgument;
+        if (width == 1) me->mmio_write8(addr, (uint8_t)value);
+        else if (width == 2) me->mmio_write16(addr, (uint16_t)value);
+        else if (width == 4) me->mmio_write32(addr, value);
+        else return kIOReturnBadArgument;
+        IOLog("RTL8723BE: debug write%u 0x%04x = 0x%08x\n", width * 8, addr, value);
+        return kIOReturnSuccess;
+    }
+    case kOpReadRF: {
+        uint32_t off = (uint32_t)(uintptr_t)a1;
+        if (off > 0xFF || !me->fHwReady) return off > 0xFF ? kIOReturnBadArgument : kIOReturnNotReady;
+        *(uint32_t *)a2 = me->getRFReg((uint8_t)off, 0xFFFFF);
+        return kIOReturnSuccess;
+    }
+    case kOpWriteRF: {
+        uint32_t off = (uint32_t)(uintptr_t)a1;
+        if (off > 0xFF || !me->fHwReady) return off > 0xFF ? kIOReturnBadArgument : kIOReturnNotReady;
+        me->setRFReg((uint8_t)off, 0xFFFFF, (uint32_t)(uintptr_t)a2);
+        if (off == RF_CHNLBW) me->fRFChnlVal = (uint32_t)(uintptr_t)a2 & 0xFFFFF;
+        IOLog("RTL8723BE: debug RF write 0x%02x = 0x%05x\n", off, (uint32_t)(uintptr_t)a2);
+        return kIOReturnSuccess;
+    }
+    case kOpDiag: {
+        RTL8723BEDiag *d = (RTL8723BEDiag *)a1;
+        memset(d, 0, sizeof(*d));
+        d->version = RTL8723BE_DIAG_VERSION;
+        d->init_stage = me->fInitStage;
+        d->fw_version = ((uint32_t)me->fFwVersion << 16) | me->fFwSubVersion;
+        if (me->fMMIOBase) {
+            d->mcufwdl = me->mmio_read32(REG_MCUFWDL);
+            d->cr = me->mmio_read16(REG_CR);
+            d->rcr = me->mmio_read32(REG_RCR);
+            d->himr = me->mmio_read32(REG_HIMR);
+            d->hisr = me->mmio_read32(REG_HISR);
+            d->rxdma_ctrl = me->mmio_read8(REG_RXDMA_CONTROL) | ((uint32_t)me->mmio_read8(REG_RXPKT_NUM) << 8);
+            // Latch the BB statistics counters (Linux rtl8723be_dm_false_alarm_counter_statistics).
+            me->setBBReg(0x0C00, 1U << 31, 1);
+            me->setBBReg(0x0D00, 1U << 31, 1);
+            d->bb_ofdm_cca = me->mmio_read32(0x0DA0) & 0xFFFF;
+            uint32_t cck = me->mmio_read32(0x0A60);
+            d->bb_cck_cca = ((cck & 0xFF) << 8) | ((cck & 0xFF00) >> 8);
+            me->setBBReg(0x0C00, 1U << 31, 0);
+            me->setBBReg(0x0D00, 1U << 31, 0);
+            d->reg_948 = me->mmio_read32(0x0948);
+            d->reg_92c = me->mmio_read32(0x092C);
+            d->reg_4c = me->mmio_read32(0x004C);
+            d->reg_765 = me->mmio_read8(0x0765);
+            d->reg_76e = me->mmio_read8(0x076E);
+            d->reg_67 = me->mmio_read8(0x0067);
+            if (me->fHwReady) {
+                d->rf_chnlbw = me->getRFReg(RF_CHNLBW, 0xFFFFF);
+                d->rf_mode = me->getRFReg(0x00, 0xFFFFF);
+            }
+        }
+        d->interrupts = me->fIntCount;
+        d->rx_desc_done = me->fRxDescDone;
+        d->rx_mgmt = me->fRxMgmt;
+        d->rx_beacons = me->fRxBeacons;
+        d->rx_data = me->fRxData;
+        d->rx_ctrl = me->fRxCtrl;
+        d->rx_crc_err = (uint32_t)me->fRxErrors;
+        d->rx_dropped = me->fRxDropped;
+        d->tx_submitted = (uint32_t)me->fTxPackets;
+        d->tx_ring_full = me->fTxRingFull;
+        d->rx_ok_cck = me->fRxOk[0]; d->rx_ok_ofdm = me->fRxOk[1]; d->rx_ok_ht = me->fRxOk[2];
+        d->rx_crc_cck = me->fRxCrc[0]; d->rx_crc_ofdm = me->fRxCrc[1]; d->rx_crc_ht = me->fRxCrc[2];
+        d->uc_data_rx = me->fUcDataRx; d->uc_delivered = me->fUcDelivered;
+        d->uc_replay = me->fUcReplay; d->uc_mic_fail = me->fUcMicFail;
+        d->bc_delivered = me->fBcDelivered; d->bc_mic_fail = me->fBcMicFail;
+        d->last_uc_fc_pn_lo = me->fLastUcFcPn; d->last_uc_rate_len = me->fLastUcRateLen;
+        d->efuse_used = me->fCalib.efuse_used;
+        d->efuse_autoload_ok = me->fCalib.autoload_ok ? 1 : 0;
+        d->package_type = me->fCalib.package_type;
+        d->ant_num = me->fAntNum;
+        d->ant_path = me->fActiveAntenna;
+        d->channel = me->fCurrentChannel;
+        d->svid = me->fCalib.svid;
+        d->smid = me->fCalib.smid;
+        return kIOReturnSuccess;
+    }
+    }
+    return kIOReturnUnsupported;
 }
 
 IOReturn RTL8723BE::getScanResults(RTL8723BEScanResults *outResults) {
     if (!outResults) return kIOReturnBadArgument;
-    IOLockLock(fStateLock);
-    memcpy(outResults, &fScanResults, sizeof(RTL8723BEScanResults));
-    IOLockUnlock(fStateLock);
-    return kIOReturnSuccess;
-}
-
-void RTL8723BE::scanTimerAction(OSObject *owner, IOTimerEventSource *timer) {
-    // Background periodic scan or dwell timer
-}
-
-// ============================================================================
-// WPA2-PSK Authentication, Association & 4-Way Handshake
-// ============================================================================
-
-IOReturn RTL8723BE::connect(const RTL8723BEConnectParams *params) {
-    if (!params) return kIOReturnBadArgument;
-    if (!fInterruptEnabled) {
-        enable(fNetif);
-    }
-
-    IOLockLock(fStateLock);
-    strncpy(fConnectedSSID, params->ssid, RTL8723BE_MAX_SSID_LEN);
-    strncpy(fPassphrase, params->passphrase, RTL8723BE_MAX_PASSPHRASE_LEN);
-    memcpy(fConnectedBSSID, params->bssid, 6);
-
-    // Derive PMK using PBKDF2-HMAC-SHA1 (4096 iterations)
-    rtl_crypto::pbkdf2_sha1(fPassphrase, strlen(fPassphrase),
-                            (const uint8_t*)fConnectedSSID, strlen(fConnectedSSID),
-                            4096, fPMK, 32);
-
-    fState = kRTLStateAuthenticating;
-    fKeyInstalled = false;
-    fLastReplayCounter = 0;
-    IOLockUnlock(fStateLock);
-
-    IOLog("RTL8723BE: Connecting to %s (BSSID %02x:%02x:%02x:%02x:%02x:%02x)...\n",
-          fConnectedSSID, fConnectedBSSID[0], fConnectedBSSID[1], fConnectedBSSID[2],
-          fConnectedBSSID[3], fConnectedBSSID[4], fConnectedBSSID[5]);
-
-    // Send Open System Auth Request
-    uint8_t auth_req[30] = {
-        0xB0, 0x00, 0x00, 0x00,
-        fConnectedBSSID[0], fConnectedBSSID[1], fConnectedBSSID[2],
-        fConnectedBSSID[3], fConnectedBSSID[4], fConnectedBSSID[5],
-        fMyMAC[0], fMyMAC[1], fMyMAC[2], fMyMAC[3], fMyMAC[4], fMyMAC[5],
-        fConnectedBSSID[0], fConnectedBSSID[1], fConnectedBSSID[2],
-        fConnectedBSSID[3], fConnectedBSSID[4], fConnectedBSSID[5],
-        0x00, 0x00, // Seq
-        0x00, 0x00, // Open System
-        0x01, 0x00, // Auth Transaction 1
-        0x00, 0x00  // Success status
-    };
-    transmitRawFrame(Q_MGNT, auth_req, sizeof(auth_req));
-
-    return kIOReturnSuccess;
-}
-
-IOReturn RTL8723BE::disconnect() {
-    IOLockLock(fStateLock);
-    deauthTeardown();
-    IOLockUnlock(fStateLock);
-    return kIOReturnSuccess;
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpScanResults, outResults);
 }
 
 IOReturn RTL8723BE::getStatus(RTL8723BEStatus *outStatus) {
     if (!outStatus) return kIOReturnBadArgument;
-    outStatus->state = (uint32_t)fState;
-    memcpy(outStatus->mac, fMyMAC, 6);
-    memcpy(outStatus->bssid, fConnectedBSSID, 6);
-    strncpy(outStatus->ssid, fConnectedSSID, RTL8723BE_MAX_SSID_LEN);
-    outStatus->channel = fCurrentChannel;
-    outStatus->rssi = -50;
-    outStatus->antenna = fActiveAntenna;
-    outStatus->tx_packets = fTxPackets;
-    outStatus->rx_packets = fRxPackets;
-    outStatus->tx_errors = fTxErrors;
-    outStatus->rx_errors = fRxErrors;
-    return kIOReturnSuccess;
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpStatus, outStatus);
+}
+
+IOReturn RTL8723BE::setAntennaPath(uint8_t ant) {
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpAntenna,
+                                   (void *)(uintptr_t)ant);
+}
+
+IOReturn RTL8723BE::debugReadReg(uint32_t addr, uint32_t width, uint32_t *outValue) {
+    if (!outValue || !fCommandGate) return kIOReturnBadArgument;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpReadReg,
+                                   (void *)(uintptr_t)addr, (void *)(uintptr_t)width, outValue);
+}
+
+IOReturn RTL8723BE::debugWriteReg(uint32_t addr, uint32_t width, uint32_t value) {
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpWriteReg,
+                                   (void *)(uintptr_t)addr, (void *)(uintptr_t)width,
+                                   (void *)(uintptr_t)value);
+}
+
+IOReturn RTL8723BE::debugReadRF(uint32_t offset, uint32_t *outValue) {
+    if (!outValue || !fCommandGate) return kIOReturnBadArgument;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpReadRF,
+                                   (void *)(uintptr_t)offset, outValue);
+}
+
+IOReturn RTL8723BE::debugWriteRF(uint32_t offset, uint32_t value) {
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpWriteRF,
+                                   (void *)(uintptr_t)offset, (void *)(uintptr_t)value);
+}
+
+IOReturn RTL8723BE::runIQK(uint32_t *outMask) {
+    if (!outMask || !fCommandGate) return kIOReturnBadArgument;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpIQK, outMask);
+}
+
+IOReturn RTL8723BE::getDiag(RTL8723BEDiag *outDiag) {
+    if (!outDiag || !fCommandGate) return kIOReturnBadArgument;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpDiag, outDiag);
 }
 
 // ============================================================================
-// Inbound Packet Dispatch & Challenger Fixes
+// 802.11 frame parsing
 // ============================================================================
 
-void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len) {
-    if (!frame || len < 24) return;
+// `len` excludes the FCS.
+bool RTL8723BE::parseBeaconOrProbe(const uint8_t *frame, size_t len, RTL8723BEDiscoveredAP &outAP) {
+    if (!frame || len < 36) return false;
 
-    uint8_t type = (frame[0] >> 2) & 0x03;
-    uint8_t subtype = (frame[0] >> 4) & 0x0F;
+    memset(&outAP, 0, sizeof(outAP));
+    memcpy(outAP.bssid, frame + 16, 6);
+    outAP.beacon_interval = (uint16_t)(frame[32] | (((uint16_t)frame[33]) << 8));
+    outAP.capabilities = (uint16_t)(frame[34] | (((uint16_t)frame[35]) << 8));
+    outAP.is_wpa2 = (outAP.capabilities & 0x0010) != 0 ? 1 : 0; // privacy bit until an RSN IE is seen
+    outAP.channel = fCurrentChannel;
 
-    if (type == 0) { // Management Frame
-        if (subtype == 8 || subtype == 5) { // Beacon or Probe Response
-            RTL8723BEDiscoveredAP ap;
-            if (parseBeaconOrProbe(frame, len, ap)) {
-                bool found = false;
-                for (uint32_t i = 0; i < fScanResults.count; ++i) {
-                    if (memcmp(fScanResults.aps[i].bssid, ap.bssid, 6) == 0) {
-                        found = true;
-                        memcpy(&fScanResults.aps[i], &ap, sizeof(ap));
-                        break;
-                    }
-                }
-                if (!found && fScanResults.count < RTL8723BE_MAX_SCAN_APS) {
-                    memcpy(&fScanResults.aps[fScanResults.count++], &ap, sizeof(ap));
-                }
-            }
-        } else if (subtype == 11) { // Auth Response
-            handleAuthResponse(frame, len);
-        } else if (subtype == 1) { // Assoc Response
-            handleAssocResponse(frame, len);
-        } else if (subtype == 12) { // Deauth Frame
-            handleDeauthFrame(frame, len);
+    size_t offset = 36;
+    while (offset + 2 <= len) {
+        uint8_t tag = frame[offset];
+        uint8_t tagLen = frame[offset + 1];
+        offset += 2;
+        if (offset + tagLen > len) break;
+
+        if (tag == 0 && tagLen <= RTL8723BE_MAX_SSID_LEN) {
+            memcpy(outAP.ssid, frame + offset, tagLen);
+            outAP.ssid[tagLen] = '\0';
+        } else if (tag == 3 && tagLen >= 1) {
+            outAP.channel = frame[offset];
+        } else if (tag == 48) {
+            outAP.is_wpa2 = 1;
         }
-    } else if (type == 2) { // Data Frame
-        size_t mac_hdr_len = (subtype & 0x08) ? 26 : 24;
-        bool is_protected = (frame[1] & 0x40) != 0;
+        offset += tagLen;
+    }
+    return true;
+}
 
-        // Challenger Fix 1: Plaintext EAPOL Interception BEFORE CCMP Decryption!
-        if (!is_protected) {
-            if (len >= mac_hdr_len + 8) {
-                const uint8_t *llc = frame + mac_hdr_len;
-                if (llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03 &&
-                    llc[6] == 0x88 && llc[7] == 0x8E) {
-                    // Direct intercept of Plaintext EAPOL Message 1 / Message 3
-                    handleEAPOLFrame(frame, len);
+// `len` excludes the FCS.
+void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
+    if (!frame || len < 10) return;
+
+    const uint8_t type = (frame[0] >> 2) & 0x03;
+    const uint8_t subtype = (frame[0] >> 4) & 0x0F;
+
+    if (type == 1) {
+        fRxCtrl++;
+        return;
+    }
+    if (len < 24) return;
+
+    if (type == 0) {
+        fRxMgmt++;
+        if (subtype == 8 || subtype == 5) { // Beacon or Probe Response
+            if (subtype == 8) fRxBeacons++;
+            RTL8723BEDiscoveredAP ap;
+            if (!parseBeaconOrProbe(frame, len, ap)) return;
+            ap.rssi = rssi;
+            if (ap.channel < 1 || ap.channel > 14) ap.channel = fCurrentChannel;
+            for (uint32_t i = 0; i < fScanResults.count; ++i) {
+                if (memcmp(fScanResults.aps[i].bssid, ap.bssid, 6) == 0) {
+                    // Keep the strongest reading and any SSID a probe response revealed.
+                    if (ap.ssid[0] == '\0') memcpy(ap.ssid, fScanResults.aps[i].ssid, sizeof(ap.ssid));
+                    if (fScanResults.aps[i].rssi > ap.rssi) ap.rssi = fScanResults.aps[i].rssi;
+                    fScanResults.aps[i] = ap;
                     return;
                 }
             }
-            // If connected, drop unsolicited plaintext data frames (security guardrail)
-            if (fState == kRTLStateConnected) return;
+            if (fScanResults.count < RTL8723BE_MAX_SCAN_APS) {
+                fScanResults.aps[fScanResults.count++] = ap;
+            }
+            return;
         }
 
-        // CCMP Protected Data Frame
-        if (is_protected && fState == kRTLStateConnected && fKeyInstalled) {
-            if (len < mac_hdr_len + 8 + 8 + 8 + 4) return; // MAC + CCMP + LLC + MIC + FCS
+        // Everything below must come from the AP we are talking to, addressed to us.
+        if (memcmp(frame + 10, fConnectedBSSID, 6) != 0) return;
+        const bool toUs = memcmp(frame + 4, fMyMAC, 6) == 0;
+        const bool bcast = (frame[4] & 0x01) != 0;
+        if (subtype == 11 && toUs) {
+            handleAuthResponse(frame, len);
+        } else if ((subtype == 1 || subtype == 3) && toUs) {
+            handleAssocResponse(frame, len);
+        } else if ((subtype == 12 || subtype == 10) && (toUs || bcast) && fState != kRTLStateDisconnected) {
+            handleDeauthFrame(frame, len);
+        }
+        return;
+    }
 
-            // Extract PN from CCMP Header
-            const uint8_t *ccmp = frame + mac_hdr_len;
-            uint64_t pn = ((uint64_t)ccmp[0]) |
-                          (((uint64_t)ccmp[1]) << 8) |
-                          (((uint64_t)ccmp[4]) << 16) |
-                          (((uint64_t)ccmp[5]) << 24) |
-                          (((uint64_t)ccmp[6]) << 32) |
-                          (((uint64_t)ccmp[7]) << 40);
+    if (type != 2) return;
+    fRxData++;
 
-            // Determine if Multicast / Broadcast (Addr1 bit 0)
-            bool is_multicast = (frame[4] & 0x01) != 0;
-            uint8_t tid = (subtype & 0x08) ? (frame[24] & 0x0F) : 0;
-            uint8_t key_id = (ccmp[3] >> 6) & 0x03;
+    // Only frames From-DS of our BSS addressed to us or group-addressed.
+    if ((frame[1] & 0x03) != 0x02 || memcmp(frame + 10, fConnectedBSSID, 6) != 0) return;
+    if (subtype & 0x04) return; // null / no-data frames
 
-            // Challenger Fix 4: Replay protection per-TID and per-GTK
-            if (is_multicast) {
-                if (key_id >= 4 || pn <= fRxGtkPN[key_id]) return; // Drop replay
-            } else {
-                if (tid >= 16 || pn <= fRxPtkPN[tid]) return; // Drop replay
-            }
+    size_t hdrLen = (subtype & 0x08) ? 26 : 24;
+    if ((subtype & 0x08) && (frame[1] & 0x80)) hdrLen += 4; // HT control present
+    if (len < hdrLen + 8) return;
+    const bool isProtected = (frame[1] & 0x40) != 0;
 
-            // Construct 13-Byte Nonce: Priority || Addr2 (AP MAC) || PN (big endian)
-            uint8_t nonce[13];
-            nonce[0] = tid;
-            for (int i = 0; i < 6; ++i) nonce[1 + i] = frame[10 + i];
-            for (int i = 0; i < 6; ++i) nonce[7 + i] = (uint8_t)((pn >> ((5 - i) * 8)) & 0xFF);
+    if (!isProtected) {
+        const uint8_t *llc = frame + hdrLen;
+        if (llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03 && llc[6] == 0x88 && llc[7] == 0x8E) {
+            handleEAPOLFrame(frame, len, hdrLen);
+        }
+        return; // never deliver unprotected data to the stack
+    }
+    if (fState != kRTLStateConnected || !fKeyInstalled) return;
+    if (len < hdrLen + 8 + 8 + 8) return; // MAC + CCMP hdr + LLC + MIC
 
-            // Challenger Fix 5: IEEE 802.11i AAD Masking
-            uint8_t aad[26];
-            memcpy(aad, frame, mac_hdr_len);
-            aad[0] &= 0x8F; // Mask Subtype if mgmt, retain data
-            aad[1] &= 0xC7; // Mask Retry, PwrMgt, MoreData
-            aad[22] = 0x00; // Mask Seq
-            aad[23] &= 0x0F;// Retain Frag
-            if (mac_hdr_len == 26) {
-                aad[24] &= 0x0F; // Retain TID
-                aad[25] = 0x00;  // Mask QoS Control high byte
-            }
+    const uint8_t *ccmp = frame + hdrLen;
+    if ((ccmp[3] & 0x20) == 0) return; // ExtIV must be set for CCMP
+    uint64_t pn = ((uint64_t)ccmp[0]) | (((uint64_t)ccmp[1]) << 8) |
+                  (((uint64_t)ccmp[4]) << 16) | (((uint64_t)ccmp[5]) << 24) |
+                  (((uint64_t)ccmp[6]) << 32) | (((uint64_t)ccmp[7]) << 40);
 
-            size_t cipher_len = len - mac_hdr_len - 8 - 8 - 4;
-            const uint8_t *ciphertext = frame + mac_hdr_len + 8;
-            const uint8_t *mic = ciphertext + cipher_len;
+    const bool isMulticast = (frame[4] & 0x01) != 0;
+    const uint8_t tid = (subtype & 0x08) ? (frame[24] & 0x0F) : 0;
+    if (!isMulticast) {
+        fUcDataRx++;
+        fLastUcFcPn = ((uint32_t)frame[0] << 24) | ((uint32_t)frame[1] << 16) | (uint32_t)(pn & 0xFFFF);
+        fLastUcRateLen = ((uint32_t)fCurRxRate << 16) | (uint32_t)(len & 0xFFFF);
+    }
+    const uint8_t keyId = (ccmp[3] >> 6) & 0x03;
 
-            uint8_t plaintext[2048];
-            if (cipher_len > sizeof(plaintext)) return;
+    if (isMulticast) {
+        if (pn <= fRxGtkPN[keyId]) return;
+    } else {
+        if (pn <= fRxPtkPN[tid]) { fUcReplay++; return; }
+    }
 
-            const uint8_t *key = is_multicast ? fGTK : (fPTK + 32);
-            if (!rtl_crypto::ccmp_decrypt(key, nonce, aad, mac_hdr_len,
-                                          ciphertext, cipher_len, mic, plaintext)) {
-                return; // Decryption / MIC check failed
-            }
+    uint8_t nonce[13];
+    uint8_t aad[30];
+    rtl_crypto::ccmp_build_nonce(frame, hdrLen, pn, nonce);
+    size_t aadLen = rtl_crypto::ccmp_build_aad(frame, hdrLen, aad);
+    if (aadLen == 0) return;
 
-            // Update verified replay counter
-            if (is_multicast) {
-                fRxGtkPN[key_id] = pn;
-            } else {
-                fRxPtkPN[tid] = pn;
-            }
+    size_t cipherLen = len - hdrLen - 8 - 8;
+    const uint8_t *ciphertext = frame + hdrLen + 8;
+    const uint8_t *mic = ciphertext + cipherLen;
+    if (cipherLen > sizeof(fRxPlain)) return;
 
-            // Validate LLC/SNAP (8 bytes: AA AA 03 00 00 00 EtherType)
-            if (cipher_len < 8 || plaintext[0] != 0xAA || plaintext[1] != 0xAA || plaintext[2] != 0x03) {
-                return;
-            }
-            uint16_t ethertype = (uint16_t)((((uint16_t)plaintext[6]) << 8) | plaintext[7]);
+    const uint8_t *key = isMulticast ? fGTK : (fPTK + 32);
+    if (!rtl_crypto::ccmp_decrypt(key, nonce, aad, aadLen, ciphertext, cipherLen, mic, fRxPlain)) {
+        fRxDropped++;
+        if (isMulticast) fBcMicFail++; else fUcMicFail++;
+        return;
+    }
+    if (isMulticast) fRxGtkPN[keyId] = pn; else fRxPtkPN[tid] = pn;
 
-            // Bridge to Ethernet II frame delivered to macOS XNU BSD stack
-            size_t eth_len = 14 + (cipher_len - 8);
-            mbuf_t m = allocatePacket((UInt32)eth_len);
-            if (m) {
-                uint8_t *dst = (uint8_t*)mbuf_data(m);
-                memcpy(dst, frame + 4, 6);       // Destination MAC
-                memcpy(dst + 6, frame + 16, 6);  // Source MAC
-                dst[12] = (uint8_t)((ethertype >> 8) & 0xFF);
-                dst[13] = (uint8_t)(ethertype & 0xFF);
-                memcpy(dst + 14, plaintext + 8, cipher_len - 8);
+    if (cipherLen < 8 || fRxPlain[0] != 0xAA || fRxPlain[1] != 0xAA || fRxPlain[2] != 0x03) return;
+    uint16_t ethertype = (uint16_t)((((uint16_t)fRxPlain[6]) << 8) | fRxPlain[7]);
+    if (ethertype == 0x888E) return; // EAPOL is consumed by the driver
 
-                fNetif->inputPacket(m, (UInt32)eth_len);
-            }
+    size_t ethLen = 14 + (cipherLen - 8);
+    mbuf_t m = allocatePacket((UInt32)ethLen);
+    if (m && fNetif) {
+        uint8_t *dst = (uint8_t*)mbuf_data(m);
+        memcpy(dst, frame + 4, 6);       // DA
+        memcpy(dst + 6, frame + 16, 6);  // SA
+        dst[12] = (uint8_t)(ethertype >> 8);
+        dst[13] = (uint8_t)(ethertype & 0xFF);
+        memcpy(dst + 14, fRxPlain + 8, cipherLen - 8);
+        fNetif->inputPacket(m, (UInt32)ethLen);
+        if (fNetStats) fNetStats->inputPackets++;
+        if (isMulticast) fBcDelivered++; else fUcDelivered++;
+    } else if (m) {
+        freePacket(m);
+    }
+}
+
+// ============================================================================
+// Open System authentication, association and WPA2-PSK 4-way handshake
+// ============================================================================
+
+// RSN IE: WPA2, CCMP group + pairwise, PSK AKM.
+size_t RTL8723BE::buildRsnIE(uint8_t *out) {
+    static const uint8_t rsn[] = {
+        0x30, 0x14, 0x01, 0x00,
+        0x00, 0x0F, 0xAC, 0x04,
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04,
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02,
+        0x00, 0x00
+    };
+    memcpy(out, rsn, sizeof(rsn));
+    return sizeof(rsn);
+}
+
+IOReturn RTL8723BE::connect(const RTL8723BEConnectParams *params) {
+    if (!params) return kIOReturnBadArgument;
+    if (!fCommandGate || !fHwReady) return kIOReturnNotReady;
+
+    char ssid[RTL8723BE_MAX_SSID_LEN + 1];
+    char pass[RTL8723BE_MAX_PASSPHRASE_LEN + 1];
+    strlcpy(ssid, params->ssid, sizeof(ssid));
+    strlcpy(pass, params->passphrase, sizeof(pass));
+    size_t passLen = strlen(pass);
+    if (ssid[0] == '\0' || passLen < 8 || passLen > 63) {
+        return kIOReturnBadArgument;
+    }
+
+    // PBKDF2 (4096 iterations) outside the work-loop gate.
+    uint8_t pmk[32];
+    rtl_crypto::pbkdf2_sha1(pass, passLen, (const uint8_t*)ssid, strlen(ssid), 4096, pmk, 32);
+
+    struct Args { const RTL8723BEConnectParams *p; const char *ssid; const char *pass; uint8_t *pmk; } a =
+        { params, ssid, pass, pmk };
+    IOReturn ret = fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpConnect, &a);
+    memset(pmk, 0, sizeof(pmk));
+    memset(pass, 0, sizeof(pass));
+    return ret;
+}
+
+IOReturn RTL8723BE::beginConnect() {
+    // Tune to the AP's channel from the last scan.
+    for (uint32_t i = 0; i < fScanResults.count; ++i) {
+        if (memcmp(fScanResults.aps[i].bssid, fConnectedBSSID, 6) == 0) {
+            setChannel(fScanResults.aps[i].channel);
+            break;
         }
     }
+    for (int i = 0; i < 6; ++i) mmio_write8(REG_BSSID + i, fConnectedBSSID[i]);
+
+    fState = kRTLStateAuthenticating;
+    fKeyInstalled = false;
+    fLastReplayCounter = 0;
+
+    IOLog("RTL8723BE: Connecting to %s (BSSID %02x:%02x:%02x:%02x:%02x:%02x) on channel %u\n",
+          fConnectedSSID, fConnectedBSSID[0], fConnectedBSSID[1], fConnectedBSSID[2],
+          fConnectedBSSID[3], fConnectedBSSID[4], fConnectedBSSID[5], fCurrentChannel);
+
+    uint8_t *f = fTxFrame;
+    memset(f, 0, 30);
+    f[0] = 0xB0;
+    memcpy(f + 4, fConnectedBSSID, 6);
+    memcpy(f + 10, fMyMAC, 6);
+    memcpy(f + 16, fConnectedBSSID, 6);
+    f[24] = 0x00; f[25] = 0x00; // Open System
+    f[26] = 0x01; f[27] = 0x00; // transaction 1
+    return transmitRawFrame(Q_MGNT, f, 30, DESC_RATE1M) ? kIOReturnSuccess : kIOReturnNoResources;
+}
+
+IOReturn RTL8723BE::disconnect() {
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpDisconnect);
 }
 
 void RTL8723BE::handleAuthResponse(const uint8_t *frame, size_t len) {
     if (len < 30 || fState != kRTLStateAuthenticating) return;
-
-    uint16_t status = (uint16_t)(frame[28] | (((uint16_t)frame[29]) << 8));
-    if (status == 0) {
-        fState = kRTLStateAssociating;
-        IOLog("RTL8723BE: Authenticated. Sending Association Request...\n");
-
-        // Send Association Request
-        uint8_t assoc_req[64];
-        assoc_req[0] = 0x00; assoc_req[1] = 0x00; assoc_req[2] = 0x00; assoc_req[3] = 0x00;
-        memcpy(assoc_req + 4, fConnectedBSSID, 6);
-        memcpy(assoc_req + 10, fMyMAC, 6);
-        memcpy(assoc_req + 16, fConnectedBSSID, 6);
-        assoc_req[22] = 0x00; assoc_req[23] = 0x00;
-        assoc_req[24] = 0x11; assoc_req[25] = 0x04; // Capabilities: ESS + Privacy
-        assoc_req[26] = 0x0A; assoc_req[27] = 0x00; // Listen Interval
-
-        size_t pos = 28;
-        // SSID IE
-        assoc_req[pos++] = 0x00;
-        size_t ssid_len = strlen(fConnectedSSID);
-        assoc_req[pos++] = (uint8_t)ssid_len;
-        memcpy(assoc_req + pos, fConnectedSSID, ssid_len);
-        pos += ssid_len;
-
-        transmitRawFrame(Q_MGNT, assoc_req, pos);
+    uint16_t seq = (uint16_t)(frame[26] | (frame[27] << 8));
+    uint16_t status = (uint16_t)(frame[28] | (frame[29] << 8));
+    if (seq != 2) return;
+    if (status != 0) {
+        IOLog("RTL8723BE: Authentication rejected (status %u)\n", status);
+        fState = kRTLStateDisconnected;
+        return;
     }
+    fState = kRTLStateAssociating;
+    IOLog("RTL8723BE: Authenticated. Sending Association Request...\n");
+
+    static const uint8_t rates[] = {0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24};
+    static const uint8_t extRates[] = {0x32, 0x04, 0x30, 0x48, 0x60, 0x6C};
+    uint8_t *f = fTxFrame;
+    size_t pos = 0;
+    f[pos++] = 0x00; f[pos++] = 0x00; f[pos++] = 0x00; f[pos++] = 0x00;
+    memcpy(f + pos, fConnectedBSSID, 6); pos += 6;
+    memcpy(f + pos, fMyMAC, 6); pos += 6;
+    memcpy(f + pos, fConnectedBSSID, 6); pos += 6;
+    f[pos++] = 0x00; f[pos++] = 0x00;
+    f[pos++] = 0x31; f[pos++] = 0x04;           // ESS | Privacy | Short Preamble | Short Slot
+    f[pos++] = 0x0A; f[pos++] = 0x00;           // Listen interval
+    size_t ssidLen = strlen(fConnectedSSID);
+    f[pos++] = 0x00; f[pos++] = (uint8_t)ssidLen;
+    memcpy(f + pos, fConnectedSSID, ssidLen); pos += ssidLen;
+    memcpy(f + pos, rates, sizeof(rates)); pos += sizeof(rates);
+    memcpy(f + pos, extRates, sizeof(extRates)); pos += sizeof(extRates);
+    pos += buildRsnIE(f + pos);
+    transmitRawFrame(Q_MGNT, f, pos, DESC_RATE1M);
 }
 
 void RTL8723BE::handleAssocResponse(const uint8_t *frame, size_t len) {
     if (len < 30 || fState != kRTLStateAssociating) return;
-
-    uint16_t status = (uint16_t)(frame[26] | (((uint16_t)frame[27]) << 8));
-    if (status == 0) {
-        fState = kRTLStateHandshake;
-        IOLog("RTL8723BE: Associated. Awaiting WPA2 4-Way Handshake...\n");
+    uint16_t status = (uint16_t)(frame[26] | (frame[27] << 8));
+    if (status != 0) {
+        IOLog("RTL8723BE: Association rejected (status %u)\n", status);
+        fState = kRTLStateDisconnected;
+        return;
     }
+    fAid = (uint16_t)((frame[28] | (frame[29] << 8)) & 0x3FFF);
+    fState = kRTLStateHandshake;
+    mmio_write8(REG_MSR, (uint8_t)((mmio_read8(REG_MSR) & 0xFC) | 0x02)); // station, linked
+    IOLog("RTL8723BE: Associated (AID %u). Awaiting WPA2 4-Way Handshake...\n", fAid);
 }
 
-void RTL8723BE::handleEAPOLFrame(const uint8_t *frame, size_t len) {
-    size_t eapol_start = 34; // QoS Data (26) + LLC/SNAP (8)
-    if (len >= 32 && frame[24] == 0xAA) {
-        eapol_start = 32;   // Non-QoS Data (24) + LLC/SNAP (8)
-    }
-    if (len < eapol_start + 4 + 95) return;
+void RTL8723BE::handleEAPOLFrame(const uint8_t *frame, size_t len, size_t hdrLen) {
+    if (fState != kRTLStateHandshake && fState != kRTLStateConnected) return;
+    const size_t eapolStart = hdrLen + 8;
+    if (len < eapolStart + 99) return;
+    const uint8_t *e = frame + eapolStart;
+    if (e[1] != 0x03 || (e[4] != 0x02 && e[4] != 0xFE)) return; // EAPOL-Key, RSN descriptor
+    const size_t eapolLen = 4 + (size_t)((e[2] << 8) | e[3]);
+    if (eapolLen < 99 || eapolStart + eapolLen > len) return;
 
-    uint16_t key_info = (uint16_t)((((uint16_t)frame[eapol_start + 5]) << 8) | frame[eapol_start + 6]);
-    bool is_mic_set = (key_info & 0x0100) != 0;
-    bool is_install_set = (key_info & 0x0040) != 0;
+    const uint16_t keyInfo = (uint16_t)((e[5] << 8) | e[6]);
+    const bool isMic = (keyInfo & 0x0100) != 0;
+    const bool isInstall = (keyInfo & 0x0040) != 0;
+    const bool isAck = (keyInfo & 0x0080) != 0;
+    if (!isAck || !(keyInfo & 0x0008)) return; // must be a pairwise frame from the authenticator
 
-    uint64_t replay_counter = 0;
-    for (int i = 0; i < 8; ++i) {
-        replay_counter = (replay_counter << 8) | frame[eapol_start + 9 + (size_t)i];
-    }
+    uint64_t replay = 0;
+    for (int i = 0; i < 8; ++i) replay = (replay << 8) | e[9 + i];
 
-    if (!is_mic_set) {
-        // Message 1 (AP -> STA)
-        // Challenger Fix 3: Replay counter validation
-        if (fLastReplayCounter > 0 && replay_counter < fLastReplayCounter) {
-            return; // Drop replayed Message 1
+    if (!isMic) {
+        // Message 1
+        if (fLastReplayCounter > 0 && replay < fLastReplayCounter) return;
+        bool retransmit = (replay == fLastReplayCounter && fLastReplayCounter > 0 &&
+                           memcmp(fANonce, e + 17, 32) == 0);
+        memcpy(fANonce, e + 17, 32);
+        fLastReplayCounter = replay;
+        if (!retransmit) {
+            read_random(fSNonce, sizeof(fSNonce));
         }
+        rtl_crypto::prf_512(fPMK, "Pairwise key expansion", fConnectedBSSID, fMyMAC, fANonce, fSNonce, fPTK);
 
-        // If retransmitted Message 1 with same counter and ANonce, reuse SNonce
-        bool is_retransmit = (replay_counter == fLastReplayCounter && fLastReplayCounter > 0 &&
-                              memcmp(fANonce, frame + eapol_start + 17, 32) == 0);
-
-        memcpy(fANonce, frame + eapol_start + 17, 32);
-        fLastReplayCounter = replay_counter;
-
-        if (!is_retransmit) {
-            // Generate deterministic synthetic SNonce
-            for (int i = 0; i < 32; ++i) fSNonce[i] = (uint8_t)(0x55 ^ i);
-        }
-
-        // Derive PTK (PRF-512)
-        rtl_crypto::prf_512(fPMK, "Pairwise key expansion",
-                            fConnectedBSSID, fMyMAC,
-                            fANonce, fSNonce,
-                            fPTK);
-
-        // Build and send Message 2 (STA -> AP)
-        uint8_t m2[200];
-        // MAC Header (26 bytes)
-        m2[0] = 0x88; m2[1] = 0x01; m2[2] = 0x00; m2[3] = 0x00;
+        uint8_t *m2 = fTxFrame;
+        m2[0] = 0x08; m2[1] = 0x01; m2[2] = 0x00; m2[3] = 0x00;   // Data, To-DS
         memcpy(m2 + 4, fConnectedBSSID, 6);
         memcpy(m2 + 10, fMyMAC, 6);
         memcpy(m2 + 16, fConnectedBSSID, 6);
-        m2[22] = 0x00; m2[23] = 0x00; m2[24] = 0x00; m2[25] = 0x00;
-
-        // LLC/SNAP (8 bytes)
-        uint8_t llc[] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
-        memcpy(m2 + 26, llc, 8);
-
-        size_t m2_eapol = 34;
-        m2[m2_eapol + 0] = 0x02; // Version
-        m2[m2_eapol + 1] = 0x03; // EAPOL-Key
-        m2[m2_eapol + 2] = 0x00;
-        m2[m2_eapol + 3] = 0x5F; // Length 95
-
-        m2[m2_eapol + 4] = 0x02; // Type
-        m2[m2_eapol + 5] = 0x01; // Key Info: Pairwise | MIC
-        m2[m2_eapol + 6] = 0x0A;
-        m2[m2_eapol + 7] = 0x00;
-        m2[m2_eapol + 8] = 0x10; // Key Length 16
-
-        // Replay Counter matching M1
-        for (int i = 7; i >= 0; --i) {
-            m2[m2_eapol + 9 + (7 - (size_t)i)] = (uint8_t)((replay_counter >> (i * 8)) & 0xFF);
-        }
-
-        // SNonce
-        memcpy(m2 + m2_eapol + 17, fSNonce, 32);
-
-        // Zero IV, RSC, Reserved
-        memset(m2 + m2_eapol + 49, 0, 32);
-
-        // Zero MIC placeholder
-        size_t mic_pos = m2_eapol + 81;
-        memset(m2 + mic_pos, 0, 16);
-
-        // Key Data Length 0
-        m2[m2_eapol + 97] = 0x00;
-        m2[m2_eapol + 98] = 0x00;
-
-        // Compute HMAC-SHA1 MIC using KCK (first 16 bytes of PTK)
+        m2[22] = 0x00; m2[23] = 0x00;
+        static const uint8_t llc[] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
+        memcpy(m2 + 24, llc, 8);
+        uint8_t *k = m2 + 32;
+        memset(k, 0, 99);
+        uint8_t rsn[32];
+        size_t rsnLen = buildRsnIE(rsn);
+        size_t bodyLen = 95 + rsnLen;
+        k[0] = 0x02; k[1] = 0x03;
+        k[2] = (uint8_t)(bodyLen >> 8); k[3] = (uint8_t)bodyLen;
+        k[4] = 0x02;
+        k[5] = 0x01; k[6] = 0x0A;          // Pairwise | MIC | HMAC-SHA1/AES
+        for (int i = 0; i < 8; ++i) k[9 + i] = e[9 + i];
+        memcpy(k + 17, fSNonce, 32);
+        k[97] = 0x00; k[98] = (uint8_t)rsnLen;
+        memcpy(k + 99, rsn, rsnLen);
         uint8_t digest[20];
-        rtl_crypto::hmac_sha1(fPTK, 16, m2 + m2_eapol, 99, digest);
-        memcpy(m2 + mic_pos, digest, 16);
-
-        transmitRawFrame(Q_BE, m2, m2_eapol + 99);
+        rtl_crypto::hmac_sha1(fPTK, 16, k, 4 + bodyLen, digest);
+        memcpy(k + 81, digest, 16);
+        transmitRawFrame(Q_MGNT, m2, 32 + 4 + bodyLen, DESC_RATE1M);
         IOLog("RTL8723BE: Received EAPOL M1. Transmitted EAPOL M2.\n");
-
-    } else if (is_mic_set && is_install_set) {
-        // Message 3 (AP -> STA)
-        // Challenger Fix 3: Strictly greater replay counter
-        if (replay_counter <= fLastReplayCounter && fKeyInstalled) {
-            // Drop replay
-            return;
-        }
-
-        // Verify MIC using KCK *before* modifying state or replay counter
-        size_t eapol_len = len - eapol_start - 4; // exclude FCS
-        uint8_t verify_buf[256];
-        if (eapol_len > sizeof(verify_buf)) return;
-        memcpy(verify_buf, frame + eapol_start, eapol_len);
-
-        uint8_t rx_mic[16];
-        memcpy(rx_mic, verify_buf + 81, 16);
-        memset(verify_buf + 81, 0, 16);
-
-        uint8_t comp_digest[20];
-        rtl_crypto::hmac_sha1(fPTK, 16, verify_buf, eapol_len, comp_digest);
-        if (memcmp(rx_mic, comp_digest, 16) != 0) {
-            IOLog("RTL8723BE: EAPOL M3 MIC verification failed!\n");
-            return;
-        }
-
-        fLastReplayCounter = replay_counter;
-
-        // Unwrap GTK from Key Data using KEK (ptk + 16)
-        if (eapol_len >= 99) {
-            uint16_t kd_len = (uint16_t)((((uint16_t)verify_buf[97]) << 8) | verify_buf[98]);
-            if (kd_len >= 32 && (99 + kd_len) <= eapol_len) {
-                uint8_t unwrapped[64];
-                if (rtl_crypto::aes_key_unwrap(fPTK + 16, verify_buf + 99, kd_len, unwrapped, sizeof(unwrapped))) {
-                    if (unwrapped[0] == 0xDD) { // KDE
-                        memcpy(fGTK, unwrapped + 8, 16);
-                    }
-                }
-            }
-        }
-
-        // Challenger Fix 2: KRACK Mitigation!
-        if (!fKeyInstalled) {
-            // First time receiving valid Message 3: Install TK and reset TX PN
-            fKeyInstalled = true;
-            fTxPN = 1;
-            for (int i = 0; i < 16; ++i) fRxPtkPN[i] = 0;
-            for (int i = 0; i < 4; ++i)  fRxGtkPN[i] = 0;
-            IOLog("RTL8723BE: Installing TK & GTK keys. Link is now secure.\n");
-        } else {
-            // Retransmitted Message 3: DO NOT reinstall TK and DO NOT reset TX PN!
-            IOLog("RTL8723BE: Retransmitted M3 detected. Preserving existing TK and TX PN.\n");
-        }
-
-        // Build and send Message 4 (STA -> AP)
-        uint8_t m4[200];
-        m4[0] = 0x88; m4[1] = 0x01; m4[2] = 0x00; m4[3] = 0x00;
-        memcpy(m4 + 4, fConnectedBSSID, 6);
-        memcpy(m4 + 10, fMyMAC, 6);
-        memcpy(m4 + 16, fConnectedBSSID, 6);
-        m4[22] = 0x00; m4[23] = 0x00; m4[24] = 0x00; m4[25] = 0x00;
-
-        uint8_t llc[] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
-        memcpy(m4 + 26, llc, 8);
-
-        size_t m4_eapol = 34;
-        m4[m4_eapol + 0] = 0x02;
-        m4[m4_eapol + 1] = 0x03;
-        m4[m4_eapol + 2] = 0x00;
-        m4[m4_eapol + 3] = 0x5F;
-
-        m4[m4_eapol + 4] = 0x02;
-        m4[m4_eapol + 5] = 0x03; // Pairwise | MIC | Secure
-        m4[m4_eapol + 6] = 0x0A;
-        m4[m4_eapol + 7] = 0x00;
-        m4[m4_eapol + 8] = 0x00;
-
-        for (int i = 7; i >= 0; --i) {
-            m4[m4_eapol + 9 + (7 - (size_t)i)] = (uint8_t)((replay_counter >> (i * 8)) & 0xFF);
-        }
-
-        memset(m4 + m4_eapol + 17, 0, 64);
-        size_t m4_mic_pos = m4_eapol + 81;
-        memset(m4 + m4_mic_pos, 0, 16);
-        m4[m4_eapol + 97] = 0x00;
-        m4[m4_eapol + 98] = 0x00;
-
-        uint8_t m4_digest[20];
-        rtl_crypto::hmac_sha1(fPTK, 16, m4 + m4_eapol, 99, m4_digest);
-        memcpy(m4 + m4_mic_pos, m4_digest, 16);
-
-        transmitRawFrame(Q_BE, m4, m4_eapol + 99);
-
-        fState = kRTLStateConnected;
-        setLinkStatus(kIONetworkLinkActive | kIONetworkLinkValid);
-        IOLog("RTL8723BE: WPA2 Handshake Complete! Connected to %s.\n", fConnectedSSID);
+        return;
     }
+
+    if (!isInstall) return; // group-key handshake not implemented
+
+    // Message 3
+    if (replay <= fLastReplayCounter && fKeyInstalled) return;
+    uint8_t verify[512];
+    if (eapolLen > sizeof(verify)) return;
+    memcpy(verify, e, eapolLen);
+    uint8_t rxMic[16];
+    memcpy(rxMic, verify + 81, 16);
+    memset(verify + 81, 0, 16);
+    uint8_t digest[20];
+    rtl_crypto::hmac_sha1(fPTK, 16, verify, eapolLen, digest);
+    if (memcmp(rxMic, digest, 16) != 0) {
+        IOLog("RTL8723BE: EAPOL M3 MIC verification failed!\n");
+        return;
+    }
+    fLastReplayCounter = replay;
+
+    // Key data is AES-key-wrapped (Encrypted Key Data bit); walk its elements for the GTK KDE.
+    uint16_t kdLen = (uint16_t)((verify[97] << 8) | verify[98]);
+    if ((keyInfo & 0x1000) && kdLen >= 24 && 99 + (size_t)kdLen <= eapolLen) {
+        uint8_t unwrapped[256];
+        if (rtl_crypto::aes_key_unwrap(fPTK + 16, verify + 99, kdLen, unwrapped, sizeof(unwrapped))) {
+            size_t plainLen = kdLen - 8;
+            for (size_t off = 0; off + 2 <= plainLen; ) {
+                uint8_t id = unwrapped[off], l = unwrapped[off + 1];
+                if (id == 0xDD && l == 0 ) break; // padding
+                if (off + 2 + l > plainLen) break;
+                if (id == 0xDD && l >= 6 + 16 && unwrapped[off + 2] == 0x00 && unwrapped[off + 3] == 0x0F &&
+                    unwrapped[off + 4] == 0xAC && unwrapped[off + 5] == 0x01) {
+                    memcpy(fGTK, unwrapped + off + 8, 16);
+                }
+                off += 2 + l;
+            }
+            memset(unwrapped, 0, sizeof(unwrapped));
+        }
+    }
+
+    if (!fKeyInstalled) {
+        fKeyInstalled = true;
+        fTxPN = 1;
+        for (int i = 0; i < 16; ++i) fRxPtkPN[i] = 0;
+        for (int i = 0; i < 4; ++i)  fRxGtkPN[i] = 0;
+        IOLog("RTL8723BE: Installing TK & GTK keys. Link is now secure.\n");
+    } else {
+        IOLog("RTL8723BE: Retransmitted M3 detected. Preserving existing TK and TX PN.\n");
+    }
+
+    uint8_t *m4 = fTxFrame;
+    m4[0] = 0x08; m4[1] = 0x01; m4[2] = 0x00; m4[3] = 0x00;
+    memcpy(m4 + 4, fConnectedBSSID, 6);
+    memcpy(m4 + 10, fMyMAC, 6);
+    memcpy(m4 + 16, fConnectedBSSID, 6);
+    m4[22] = 0x00; m4[23] = 0x00;
+    static const uint8_t llc[] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
+    memcpy(m4 + 24, llc, 8);
+    uint8_t *k = m4 + 32;
+    memset(k, 0, 99);
+    k[0] = 0x02; k[1] = 0x03; k[2] = 0x00; k[3] = 0x5F;
+    k[4] = 0x02;
+    k[5] = 0x03; k[6] = 0x0A;              // Pairwise | MIC | Secure
+    for (int i = 0; i < 8; ++i) k[9 + i] = e[9 + i];
+    uint8_t d4[20];
+    rtl_crypto::hmac_sha1(fPTK, 16, k, 99, d4);
+    memcpy(k + 81, d4, 16);
+    transmitRawFrame(Q_MGNT, m4, 32 + 99, DESC_RATE1M);
+
+    fState = kRTLStateConnected;
+    setLinkStatus(kIONetworkLinkActive | kIONetworkLinkValid, getSelectedMedium());
+    refreshLED(true);
+    IOLog("RTL8723BE: WPA2 Handshake Complete! Connected to %s.\n", fConnectedSSID);
 }
 
 void RTL8723BE::handleDeauthFrame(const uint8_t *frame, size_t len) {
-    IOLog("RTL8723BE: Received Deauthentication frame. Tearing down link.\n");
+    uint16_t reason = len >= 26 ? (uint16_t)(frame[24] | (frame[25] << 8)) : 0;
+    IOLog("RTL8723BE: Received %s from AP (reason %u). Tearing down link.\n",
+          ((frame[0] >> 4) & 0xF) == 12 ? "Deauthentication" : "Disassociation", reason);
     deauthTeardown();
 }
 
-// Challenger Fix 6: Safe Deauthentication Teardown Sequence
 void RTL8723BE::deauthTeardown() {
-    // 1. Halt MAC TX DMA
-    mmio_write16(REG_CR, mmio_read16(REG_CR) & ~0x0004);
-
-    // 2. Clear TX descriptor rings and reclaim ownership
-    for (int q = 0; q < 8; ++q) {
-        if (fTxRingDescVirt[q]) {
-            for (int i = 0; i < RTL8723BE_TX_DESC_COUNT; ++i) {
-                fTxRingDescVirt[q][i].set_own(false);
-            }
-        }
+    if (fState == kRTLStateConnected || fState == kRTLStateHandshake) {
+        uint8_t *f = fTxFrame;
+        memset(f, 0, 26);
+        f[0] = 0xC0;                           // Deauthentication
+        memcpy(f + 4, fConnectedBSSID, 6);
+        memcpy(f + 10, fMyMAC, 6);
+        memcpy(f + 16, fConnectedBSSID, 6);
+        f[24] = 0x03;                          // reason: leaving
+        transmitRawFrame(Q_MGNT, f, 26, DESC_RATE1M);
     }
 
-    // 3. Flush internal PCIe FIFO
-    mmio_write16(REG_PCIE_CTRL_REG, 0x0000);
+    setLinkStatus(kIONetworkLinkValid, nullptr);
+    mmio_write8(REG_MSR, (uint8_t)(mmio_read8(REG_MSR) & 0xFC));
+    for (int i = 0; i < 6; ++i) mmio_write8(REG_BSSID + i, 0);
 
-    // 4. Set macOS network link inactive (valid status but not active)
-    setLinkStatus(kIONetworkLinkValid);
-
-    // 5. Zero out cryptographic keys and reset replay tracking
     memset(fPTK, 0, sizeof(fPTK));
     memset(fGTK, 0, sizeof(fGTK));
+    memset(fPMK, 0, sizeof(fPMK));
     fKeyInstalled = false;
     fLastReplayCounter = 0;
     fTxPN = 1;
     for (int i = 0; i < 16; ++i) fRxPtkPN[i] = 0;
     for (int i = 0; i < 4; ++i)  fRxGtkPN[i] = 0;
-
     fState = kRTLStateDisconnected;
 }
 
-// Challenger Fix 6: 802.11 Null-Data Frame (PM=1 before scan, PM=0 after)
 void RTL8723BE::sendNullDataFrame(bool powerManagement) {
-    uint8_t null_frame[26];
-    null_frame[0] = 0x48; // QoS Null Data
-    null_frame[1] = powerManagement ? 0x11 : 0x01; // To DS | (PM=1 if true)
-    null_frame[2] = 0x00; null_frame[3] = 0x00;
-    memcpy(null_frame + 4, fConnectedBSSID, 6);
-    memcpy(null_frame + 10, fMyMAC, 6);
-    memcpy(null_frame + 16, fConnectedBSSID, 6);
-    null_frame[22] = 0x00; null_frame[23] = 0x00;
-    null_frame[24] = 0x00; null_frame[25] = 0x00;
-
-    transmitRawFrame(Q_VO, null_frame, sizeof(null_frame));
+    uint8_t *f = fTxFrame;
+    memset(f, 0, 24);
+    f[0] = 0x48;                                   // Null function (no QoS)
+    f[1] = powerManagement ? 0x11 : 0x01;          // To-DS (| PM)
+    memcpy(f + 4, fConnectedBSSID, 6);
+    memcpy(f + 10, fMyMAC, 6);
+    memcpy(f + 16, fConnectedBSSID, 6);
+    transmitRawFrame(Q_MGNT, f, 24, DESC_RATE1M);
 }
 
 // ============================================================================
@@ -1855,118 +2840,79 @@ void RTL8723BE::sendNullDataFrame(bool powerManagement) {
 // ============================================================================
 
 UInt32 RTL8723BE::outputPacket(mbuf_t m, void *param) {
+    (void)param;
     if (!m) return kIOReturnOutputSuccess;
 
-    if (fState != kRTLStateConnected || !fKeyInstalled) {
+    if (!fHwReady || fState != kRTLStateConnected || !fKeyInstalled) {
         freePacket(m);
         return kIOReturnOutputDropped;
     }
 
-    size_t pkt_len = mbuf_pkthdr_len(m);
-    if (pkt_len < 14) {
+    size_t pktLen = mbuf_pkthdr_len(m);
+    if (pktLen < 14 || pktLen > sizeof(fOutEth)) {
         freePacket(m);
         return kIOReturnOutputDropped;
     }
-
-    uint8_t eth_buf[1514];
-    if (pkt_len > sizeof(eth_buf)) {
-        freePacket(m);
-        return kIOReturnOutputDropped;
-    }
-    mbuf_copydata(m, 0, pkt_len, eth_buf);
-
-    uint16_t ether_type = (uint16_t)((((uint16_t)eth_buf[12]) << 8) | eth_buf[13]);
-
-    // Challenger Fix 7: Drop raw user-space injected EAPOL packets
-    if (ether_type == 0x888E) {
-        freePacket(m);
-        return kIOReturnOutputDropped;
-    }
-
-    const uint8_t *da = eth_buf;
-    const uint8_t *sa = eth_buf + 6;
-    const uint8_t *payload = eth_buf + 14;
-    size_t payload_len = pkt_len - 14;
-
-    uint8_t frame[2048];
-    size_t frame_pos = 0;
-
-    // 1. 802.11 QoS Data MAC Header (26 bytes)
-    frame[0] = 0x88;
-    frame[1] = 0x41; // To DS = 1, Protected = 1
-    frame[2] = 0x00; frame[3] = 0x00;
-    memcpy(frame + 4, fConnectedBSSID, 6); // Addr1: BSSID
-    memcpy(frame + 10, sa, 6);             // Addr2: SA (My MAC)
-    memcpy(frame + 16, da, 6);             // Addr3: DA
-    frame[22] = 0x00; frame[23] = 0x00;
-    frame[24] = 0x00; frame[25] = 0x00;    // QoS Control (TID 0)
-    frame_pos = 26;
-
-    // 2. CCMP Header (8 bytes)
-    uint64_t pn = fTxPN++;
-    frame[frame_pos + 0] = (uint8_t)(pn & 0xFF);
-    frame[frame_pos + 1] = (uint8_t)((pn >> 8) & 0xFF);
-    frame[frame_pos + 2] = 0x00;
-    frame[frame_pos + 3] = 0x20; // ExtIV = 1
-    frame[frame_pos + 4] = (uint8_t)((pn >> 16) & 0xFF);
-    frame[frame_pos + 5] = (uint8_t)((pn >> 24) & 0xFF);
-    frame[frame_pos + 6] = (uint8_t)((pn >> 32) & 0xFF);
-    frame[frame_pos + 7] = (uint8_t)((pn >> 40) & 0xFF);
-    frame_pos += 8;
-
-    // 3. 13-Byte Nonce
-    uint8_t nonce[13];
-    nonce[0] = 0x00; // TID 0
-    memcpy(nonce + 1, sa, 6);
-    for (int i = 0; i < 6; ++i) {
-        nonce[7 + i] = (uint8_t)((pn >> ((5 - i) * 8)) & 0xFF);
-    }
-
-    // 4. Challenger Fix 5: Masked AAD (26 bytes)
-    uint8_t aad[26];
-    memcpy(aad, frame, 26);
-    aad[0] &= 0x8F;
-    aad[1] &= 0xC7;
-    aad[22] = 0x00;
-    aad[23] = 0x00;
-    aad[24] &= 0x0F;
-    aad[25] = 0x00;
-
-    // 5. Plaintext: RFC 1042 LLC/SNAP (8 bytes) + Ethernet Payload
-    uint8_t plaintext[1600];
-    plaintext[0] = 0xAA; plaintext[1] = 0xAA; plaintext[2] = 0x03;
-    plaintext[3] = 0x00; plaintext[4] = 0x00; plaintext[5] = 0x00;
-    plaintext[6] = (uint8_t)((ether_type >> 8) & 0xFF);
-    plaintext[7] = (uint8_t)(ether_type & 0xFF);
-    size_t plain_len = 8 + payload_len;
-    if (plain_len > sizeof(plaintext)) {
-        freePacket(m);
-        return kIOReturnOutputDropped;
-    }
-    memcpy(plaintext + 8, payload, payload_len);
-
-    // 6. CCMP Encrypt under TK (fPTK + 32)
-    uint8_t mic[8];
-    rtl_crypto::ccmp_encrypt(fPTK + 32, nonce, aad, 26,
-                             plaintext, plain_len,
-                             frame + frame_pos, mic);
-    frame_pos += plain_len;
-
-    // Append 8-byte MIC
-    memcpy(frame + frame_pos, mic, 8);
-    frame_pos += 8;
-
-    // 7. IEEE 802.11 CRC32 FCS
-    uint32_t crc = rtl_crypto::crc32_80211(frame, frame_pos);
-    frame[frame_pos + 0] = (uint8_t)(crc & 0xFF);
-    frame[frame_pos + 1] = (uint8_t)((crc >> 8) & 0xFF);
-    frame[frame_pos + 2] = (uint8_t)((crc >> 16) & 0xFF);
-    frame[frame_pos + 3] = (uint8_t)((crc >> 24) & 0xFF);
-    frame_pos += 4;
-
-    // Transmit via Hardware BE DMA Queue
-    bool ok = transmitRawFrame(Q_BE, frame, frame_pos);
-
+    mbuf_copydata(m, 0, pktLen, fOutEth);
     freePacket(m);
-    return ok ? kIOReturnOutputSuccess : kIOReturnOutputDropped;
+
+    uint16_t etherType = (uint16_t)((fOutEth[12] << 8) | fOutEth[13]);
+    if (etherType == 0x888E) {
+        return kIOReturnOutputDropped; // user space must not inject EAPOL
+    }
+    const uint8_t *da = fOutEth;
+    const uint8_t *payload = fOutEth + 14;
+    size_t payloadLen = pktLen - 14;
+
+    uint8_t *frame = fOutFrame;
+    frame[0] = 0x88;                 // QoS Data
+    frame[1] = 0x41;                 // To-DS | Protected
+    frame[2] = 0x00; frame[3] = 0x00;
+    memcpy(frame + 4, fConnectedBSSID, 6);
+    memcpy(frame + 10, fMyMAC, 6);
+    memcpy(frame + 16, da, 6);
+    frame[22] = 0x00; frame[23] = 0x00;
+    frame[24] = 0x00; frame[25] = 0x00;
+    size_t pos = 26;
+
+    uint64_t pn = fTxPN++;
+    frame[pos + 0] = (uint8_t)(pn & 0xFF);
+    frame[pos + 1] = (uint8_t)((pn >> 8) & 0xFF);
+    frame[pos + 2] = 0x00;
+    frame[pos + 3] = 0x20;           // ExtIV, key id 0
+    frame[pos + 4] = (uint8_t)((pn >> 16) & 0xFF);
+    frame[pos + 5] = (uint8_t)((pn >> 24) & 0xFF);
+    frame[pos + 6] = (uint8_t)((pn >> 32) & 0xFF);
+    frame[pos + 7] = (uint8_t)((pn >> 40) & 0xFF);
+    pos += 8;
+
+    uint8_t nonce[13];
+    uint8_t aad[30];
+    rtl_crypto::ccmp_build_nonce(frame, 26, pn, nonce);
+    size_t aadLen = rtl_crypto::ccmp_build_aad(frame, 26, aad);
+
+    size_t plainLen = 8 + payloadLen;
+    if (plainLen > sizeof(fTxPlain) || pos + plainLen + 8 > sizeof(fOutFrame)) {
+        return kIOReturnOutputDropped;
+    }
+    fTxPlain[0] = 0xAA; fTxPlain[1] = 0xAA; fTxPlain[2] = 0x03;
+    fTxPlain[3] = 0x00; fTxPlain[4] = 0x00; fTxPlain[5] = 0x00;
+    fTxPlain[6] = (uint8_t)(etherType >> 8);
+    fTxPlain[7] = (uint8_t)(etherType & 0xFF);
+    memcpy(fTxPlain + 8, payload, payloadLen);
+
+    uint8_t mic[8];
+    rtl_crypto::ccmp_encrypt(fPTK + 32, nonce, aad, aadLen, fTxPlain, plainLen, frame + pos, mic);
+    pos += plainLen;
+    memcpy(frame + pos, mic, 8);
+    pos += 8;
+
+    // The MAC appends the FCS itself.
+    if (!transmitRawFrame(Q_BE, frame, pos, DESC_RATE24M)) {
+        fTxErrors++;
+        if (fNetStats) fNetStats->outputErrors++;
+        return kIOReturnOutputDropped;
+    }
+    if (fNetStats) fNetStats->outputPackets++;
+    return kIOReturnOutputSuccess;
 }

@@ -1,73 +1,78 @@
-# Realtek RTL8723BE PCIe (`pci10ec,b723`) macOS Wi-Fi Driver & Wireless Utility
+# Realtek RTL8723BE (`pci10ec,b723`) Wi-Fi driver for macOS
 
-Complete native macOS Kernel Extension (`RTL8723BEWiFi.kext`), embedded 8051 MCU firmware (`rtl8723befw.bin`), user-space CLI (`rtl8723be_cli`), and native macOS GUI application (`RTL8723BE Wireless Utility.app` inside `RTL8723BE_WiFi_Installer.dmg`) for the **Realtek RTL8723BE PCIe 802.11b/g/n Wireless LAN Adapter** (`vendor-id: 0x10ec`, `device-id: 0xb723`, HP subsystem `0x103c:0x804c`) on macOS (including **macOS 26.6.2 / Darwin 25.6.0**).
+A kernel extension (`RTL8723BEWiFi.kext`), menu-bar app (`RTL8723BE Wireless Utility.app`)
+and command-line tool (`rtl8723be_cli`) for the **Realtek RTL8723BE PCIe 802.11b/g/n** card,
+aimed at OpenCore hackintoshes. The hardware bring-up is a port of Linux
+`drivers/net/wireless/realtek/rtlwifi/rtl8723be`.
 
-> **Experimental — boot crash investigation in progress.** The existing v1.0.0
-> binaries/DMG are not hardware-validated and should not be installed in a working
-> or recovery EFI. New source builds refuse hardware startup unless the boot arg
-> `rtl8723be_experimental=1` is present. This is a development override, not a
-> recommendation to test on your daily machine. See [crash review](docs/CRASH_REVIEW.md).
-> `stage_opencore.sh` now stages locally only, with the OpenCore entry disabled.
-> Current test instructions are below; earlier published releases remain unsafe.
+**Status (v1.3.0): working.** Verified on an HP laptop (subsystem `103c:804c`) running macOS 26
+(Darwin 25): scan, WPA2-PSK connect, DHCP, and internet traffic over Wi-Fi.
 
----
+| | |
+|---|---|
+| Scan (2.4 GHz, channels 1–13) | ✅ ~30 networks |
+| WPA2-PSK (CCMP) connect, DHCP | ✅ |
+| Ping to router / internet | ✅ 0% loss (~4 ms / ~30 ms) |
+| Throughput | ~3.5 Mbit/s (802.11g rates; see limitations) |
 
-## Features
+## Install
 
-- **`RTL8723BEWiFi.kext` (`IOEthernetController` + `IOUserClient`)**:
-  - Matches `IOPCIMatch = 0xB72310EC` (`pci10ec,b723`) and attaches directly to the PCIe BAR2 16 KB MMIO space.
-  - Full RTL8723BE hardware bring-up ported from Linux `drivers/net/wireless/realtek/rtlwifi/rtl8723be` and OpenBSD `rtwn`:
-    - Hardware power sequence (`pwrseq` / `initLLT`)
-    - Indirect eFuse (`0x0030`/`0x0034`) MAC address and RF calibration decoding
-    - Embedded 28,224-byte `rtl8723befw.bin` 8051 MCU firmware upload and checksum/boot handshake (`REG_MCUFWDL 0x0080`)
-    - Baseband/AGC/RF table programming and 2.4 GHz Channels 1–13 3-wire LSSI synthesizer tuning
-    - **HP Single-Antenna Diversity Fix (`103c:804c`)**: Hardware RF switch between `Antenna #1 (Main)` and `Antenna #2 (Aux)`
-    - 8-ring TX DMA (`TxDesc40`) and RX DMA (`RxDesc32`) ring management via `IOBufferMemoryDescriptor`
-    - Complete IEEE 802.11 Beacon/Probe scanner, Open System Auth/Assoc state machine, and IEEE 802.11i WPA2-PSK (PBKDF2-SHA1, EAPOL 4-Way Handshake with KRACK replay mitigation, and RFC 1042 LLC/SNAP + AES-CCMP 128-bit encryption/decryption).
-- **Native macOS GUI App (`RTL8723BE Wireless Utility.app` inside `dist/RTL8723BE_WiFi_Installer.dmg`)**:
-  - macOS Menu Bar Wi-Fi status icon + Main Dashboard Window.
-  - One-click **2.4 GHz Network Scanner** and **WPA2-PSK Password Prompt**.
-  - Live hardware telemetry (MAC address, BSSID, channel, RSSI dBm, TX/RX packet counters) and **Antenna #1 (Main) / Antenna #2 (Aux - HP)** toggle.
-  - Built-in testing guide and guarded manual loader; no automatic EFI installation.
-- **57-Test Hardware Emulation & Protocol Verification Suite (`tests/test_runner`)**:
-  - 100% pass rate (`57/57` tests) across virtual PCIe MMIO/eFuse, 8051 MCU firmware loader, TX/RX DMA descriptor rings, 802.11 beacon parser, WPA2 4-way handshake, and AES-CCMP crypto.
+1. Add **`rtl8723be_experimental=1`** to `boot-args` in your OpenCore `config.plist`
+   (NVRAM → `7C436110-AB2A-4BBB-A880-FE41995C9F82`) and reboot. Without it the driver refuses
+   to start. Your SIP/OpenCore setup must allow third-party kexts.
+2. Download the DMG from [Releases](https://github.com/AA-EION/RTL8723BE-macOS-WiFi/releases),
+   open it and run **Install RTL8723BE WiFi.pkg**. It installs:
+   - `RTL8723BE Wireless Utility.app` → `/Applications`
+   - `RTL8723BEWiFi.kext` → `/Library/Extensions`
+   - `rtl8723be_cli` → `/usr/local/bin`
+3. Allow the driver in **System Settings → Privacy & Security** and restart.
+4. Connect with the app (Scan → pick network → password), or:
+   ```bash
+   rtl8723be_cli scan
+   rtl8723be_cli connect "Network Name" 'password'
+   ```
 
----
+The package is unsigned: if macOS blocks it, right-click → Open. The installer never touches
+NVRAM or the EFI partition. To remove everything: `sudo ./uninstall.sh` from the DMG.
 
-## Testing the current development build (1.0.1)
+Do not inject this kext through OpenCore; install it with the package.
 
-Open `build/RTL8723BE Wireless Utility.app`, or the rebuilt DMG in `dist/`.
-The app's **Testing Guide** explains normal internal-disk boot verification,
-preparing a manual test boot, logging, loading after login, and rollback.
-Its **Load Test Driver (after login)** button uses the guarded manual loader.
-The app no longer mounts or installs into EFI.
+## How it works / notes
 
-Follow [the testing instructions](docs/TESTING.md). Keep the OpenCore RTL8723BE
-entry disabled. Do not use the old published v1.0.0 installer or the old
-`stage_opencore.sh --load` command.
+- macOS sees the card as a **wired Ethernet port** (`en*`). Networks are listed in the app and
+  CLI, not in the macOS Wi-Fi menu: that needs Apple's private `IO80211Family`, which third-party
+  drivers cannot use on current macOS.
+- **Antenna:** many HP boards have a single antenna on the AUX port while the eFuse claims two
+  (Linux needs `ant_sel=1` there). The first scan measures both RF paths and keeps the better
+  one. Override with the boot arg `rtl8723be_ant_sel=1|2` or `rtl8723be_cli antenna 1|2`.
+- **Firmware:** the driver embeds Realtek's `rtl8723befw_36.bin` from
+  [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git)
+  (redistributable, see [LICENCE.rtlwifi_firmware.txt](LICENCE.rtlwifi_firmware.txt)). The older
+  v15 image is selectable with `rtl8723be_fw=15`; it breaks OFDM reception on this hardware.
+- **Diagnostics:** `rtl8723be_cli diag` (RX/TX counters per rate, antenna and coex registers),
+  `reg read|write`, `rf read|write`, `dump`, `iqk`. Writes need `sudo`.
+- Driver log: `/usr/bin/log show --last 10m --predicate 'eventMessage CONTAINS "RTL8723BE"'`.
 
----
+## Limitations
 
-## Building from Source
+- 802.11g association only (no 802.11n/HT yet), fixed 24 Mbit/s TX rate, no rate adaptation.
+- WPA2-PSK only (no open/WEP/WPA3/enterprise); no group-key rekey handshake.
+- No power management, sleep/wake re-initialisation, or roaming.
+- 2.4 GHz only (the hardware has no 5 GHz).
+
+## Building from source
 
 ```bash
-# Build RTL8723BEWiFi.kext and tools/rtl8723be_cli
-make clean && make all
-
-# Run the 57-test hardware register / DMA / 802.11 / WPA2-CCMP verification suite
-make test
-
-# Build the native macOS GUI application (.app) and distributable Disk Image (.dmg)
-./scripts/build_dmg.sh
+make all                 # kext + CLI
+make test-hardware test-crypto   # descriptor/eFuse/table and CCMP (IEEE 802.11 vector) tests
+./scripts/build_dmg.sh   # app, installer .pkg and dist/RTL8723BE_WiFi_Installer.dmg
 ```
 
----
+## Repository structure
 
-## Repository Structure
-
-- [`src/`](src/) — Kernel extension C++ source (`RTL8723BE.cpp`, `RTL8723BEUserClient.cpp`, `RTL8723BE_crypto.cpp`, `RTL8723BE_firmware.cpp`, `RTL8723BE_tables.cpp`, `Info.plist`)
-- [`gui/`](gui/) — Native macOS Swift/AppKit/SwiftUI GUI application (`RTL8723BEApp.swift`, `RTL8723BEBridge.h`, `Info.plist`)
-- [`tools/`](tools/) — Command-line utility (`rtl8723be_cli.cpp`)
-- [`scripts/`](scripts/) — `build_dmg.sh` (DMG packager) and `stage_opencore.sh` (OpenCore EFI & `kmutil` verifier)
-- [`tests/`](tests/) — 57-test mock PCIe MMIO/DMA/802.11/WPA2 hardware verification suite
-- [`docs/DESIGN.md`](docs/DESIGN.md) — 76 KB Engineering Design & Hardware Register Specification
+- [`src/`](src/) — kernel extension (`RTL8723BE.cpp` hardware/802.11, `RTL8723BEUserClient.cpp`,
+  `RTL8723BE_crypto.cpp`, `RTL8723BE_tables.cpp` Linux PHY/RF tables, firmware images)
+- [`gui/`](gui/) — Swift/AppKit app; [`tools/`](tools/) — CLI
+- [`installer/`](installer/) — package scripts and installer texts;
+  [`scripts/`](scripts/) — `build_dmg.sh`, `load_test_kext.sh`, `uninstall.sh`
+- [`tests/`](tests/) — unit tests; [`docs/`](docs/) — design notes and earlier test/crash write-ups

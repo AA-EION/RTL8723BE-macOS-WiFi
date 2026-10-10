@@ -34,26 +34,54 @@ cp -R "${PROJECT_DIR}/build/RTL8723BEWiFi.kext" "${APP_BUNDLE}/Contents/Resource
 cp "${PROJECT_DIR}/tools/rtl8723be_cli" "${APP_BUNDLE}/Contents/Resources/rtl8723be_cli"
 cp "${PROJECT_DIR}/scripts/load_test_kext.sh" "${APP_BUNDLE}/Contents/Resources/load_test_kext.sh"
 cp "${PROJECT_DIR}/docs/TESTING.md" "${APP_BUNDLE}/Contents/Resources/Testing Guide.txt"
+cp "${PROJECT_DIR}/LICENCE.rtlwifi_firmware.txt" "${APP_BUNDLE}/Contents/Resources/LICENCE.rtlwifi_firmware.txt"
 
 # 6. Ad-hoc sign the .app bundle
 codesign --force --deep --sign - "${APP_BUNDLE}"
 codesign --verify --deep --strict "${APP_BUNDLE}"
 echo "[+] Signed and verified ${APP_BUNDLE}"
 
-# 7. Assemble DMG Staging Folder
+# 7. Build the installer package (app -> /Applications, kext -> /Library/Extensions,
+#    CLI -> /usr/local/bin). Nothing touches NVRAM or the EFI partition.
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${PROJECT_DIR}/src/Info.plist")"
+PKG_WORK="${PROJECT_DIR}/build/pkg"
+PKG_ROOT="${PKG_WORK}/root"
+rm -rf "${PKG_WORK}"
+mkdir -p "${PKG_ROOT}/Applications" "${PKG_ROOT}/Library/Extensions" "${PKG_ROOT}/usr/local/bin" "${PKG_WORK}/resources"
+ditto "${APP_BUNDLE}" "${PKG_ROOT}/Applications/${APP_NAME}"
+ditto "${PROJECT_DIR}/build/RTL8723BEWiFi.kext" "${PKG_ROOT}/Library/Extensions/RTL8723BEWiFi.kext"
+cp "${PROJECT_DIR}/tools/rtl8723be_cli" "${PKG_ROOT}/usr/local/bin/rtl8723be_cli"
+pkgbuild --analyze --root "${PKG_ROOT}" "${PKG_WORK}/component.plist"
+# Never let Installer "relocate" the app onto some other copy with the same bundle ID.
+i=0
+while /usr/libexec/PlistBuddy -c "Print :${i}" "${PKG_WORK}/component.plist" >/dev/null 2>&1; do
+    /usr/libexec/PlistBuddy -c "Delete :${i}:BundleIsRelocatable" "${PKG_WORK}/component.plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :${i}:BundleIsRelocatable bool false" "${PKG_WORK}/component.plist"
+    i=$((i + 1))
+done
+pkgbuild --root "${PKG_ROOT}" --component-plist "${PKG_WORK}/component.plist" \
+    --scripts "${PROJECT_DIR}/installer/scripts" \
+    --identifier com.rtl8723be.macos.wifi.pkg --version "${VERSION}" --install-location / \
+    "${PKG_WORK}/RTL8723BE-component.pkg"
+cp "${PROJECT_DIR}/installer/resources/"*.txt "${PROJECT_DIR}/LICENCE.rtlwifi_firmware.txt" "${PKG_WORK}/resources/"
+sed "s/__VERSION__/${VERSION}/" "${PROJECT_DIR}/installer/Distribution.xml" > "${PKG_WORK}/Distribution.xml"
+PKG_OUT="${PKG_WORK}/RTL8723BE WiFi ${VERSION}.pkg"
+productbuild --distribution "${PKG_WORK}/Distribution.xml" --resources "${PKG_WORK}/resources" \
+    --package-path "${PKG_WORK}" "${PKG_OUT}"
+pkgutil --check-signature "${PKG_OUT}" >/dev/null 2>&1 || true
+echo "[+] Installer package: ${PKG_OUT}"
+
+# 8. Assemble DMG: installer, uninstaller, docs and licence.
 rm -rf "${DMG_ROOT}"
 mkdir -p "${DMG_ROOT}"
-cp -R "${APP_BUNDLE}" "${DMG_ROOT}/${APP_NAME}"
-ln -s /Applications "${DMG_ROOT}/Applications"
-cp -R "${PROJECT_DIR}/build/RTL8723BEWiFi.kext" "${DMG_ROOT}/RTL8723BEWiFi.kext"
-cp "${PROJECT_DIR}/tools/rtl8723be_cli" "${DMG_ROOT}/rtl8723be_cli"
+cp "${PKG_OUT}" "${DMG_ROOT}/Install RTL8723BE WiFi.pkg"
+cp "${PROJECT_DIR}/scripts/uninstall.sh" "${DMG_ROOT}/uninstall.sh"
+cp "${PROJECT_DIR}/installer/resources/welcome.txt" "${DMG_ROOT}/Read Me.txt"
+cp "${PROJECT_DIR}/LICENCE.rtlwifi_firmware.txt" "${DMG_ROOT}/LICENCE.rtlwifi_firmware.txt"
 
-cp "${PROJECT_DIR}/docs/TESTING.md" "${DMG_ROOT}/Testing Guide.txt"
-
-# 8. Create compressed UDZO DMG and verify
 mkdir -p "${PROJECT_DIR}/dist"
 rm -f "${DMG_OUT}"
-hdiutil create -volname "RTL8723BE Wi-Fi Installer" \
+hdiutil create -volname "RTL8723BE WiFi ${VERSION}" \
     -srcfolder "${DMG_ROOT}" \
     -ov -format UDZO \
     "${DMG_OUT}"

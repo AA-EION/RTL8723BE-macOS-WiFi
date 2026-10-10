@@ -30,10 +30,17 @@ public:
     static IOReturn sDisconnect(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sGetStatus(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sSetAntenna(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sReadReg(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sWriteReg(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sReadRF(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sWriteRF(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sGetDiag(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sIQCalibrate(OSObject *target, void *reference, IOExternalMethodArguments *args);
 
 private:
     RTL8723BE *fOwner;
     task_t     fTask;
+    bool       fIsAdmin;
 };
 
 #endif // _RTL8723BE_USER_CLIENT_HPP_

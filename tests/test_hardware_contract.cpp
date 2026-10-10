@@ -72,10 +72,38 @@ int main() {
     RxDesc32 rx = {};
     rx.set_buffer_addr(0x23456000);
     rx.set_length(2048);
+    assert(REG_MAC_PHY_CTRL == 0x2C && REG_AFE_XTAL_CTRL == 0x24);
+    assert(REG_RXDMA_CONTROL == 0x286 && REG_PBP == 0x104 && REG_RQPN == 0x200);
     rx.set_eor(true);
     rx.set_own(true);
     assert(sizeof(rx) == 32);
     assert(wordAt(&rx, 24) == 0x23456000);
     assert(wordAt(&rx, 0) == 0xC0000800);
+    // eFuse PG stream decoding (Linux efuse.c read_efuse): sections are 8 bytes wide,
+    // word-enable bits are active-low, and sections >= 16 use a 2-byte extended header.
+    {
+        uint8_t phys[64];
+        std::memset(phys, 0xFF, sizeof(phys));
+        size_t p = 0;
+        phys[p++] = 0x0E;                          // section 0, word 0 only (wren = 1110b)
+        phys[p++] = 0x29; phys[p++] = 0x81;        // EEPROM ID 0x8129
+        // Section 0x1A (logical 0xD0..0xD7) via extended header: hdr = (sec&7)<<5 | 0x0F,
+        // hdr2 = (sec>>3)<<4 | wren.
+        phys[p++] = (uint8_t)(((0x1A & 0x7) << 5) | 0x0F);
+        phys[p++] = (uint8_t)(((0x1A >> 3) << 4) | 0x08); // words 0..2 present
+        const uint8_t mac[6] = {0x1C, 0x39, 0x47, 0xAB, 0xCD, 0xEF};
+        for (int i = 0; i < 6; ++i) phys[p++] = mac[i];
+        phys[p++] = 0x78;                          // section 7 (0x38..0x3F), word 0 only... wren=1000b -> words 0-2
+        phys[p++] = 0x11; phys[p++] = 0x22; phys[p++] = 0x33; phys[p++] = 0x44; phys[p++] = 0x55; phys[p++] = 0x66;
+        uint8_t map[512];
+        size_t used = rtlEfuseDecode(phys, sizeof(phys), map, sizeof(map));
+        assert(used == p);
+        assert(map[0] == 0x29 && map[1] == 0x81);
+        assert(map[2] == 0xFF);
+        assert(std::memcmp(&map[0xD0], mac, 6) == 0);
+        assert(map[0xD6] == 0xFF);
+        assert(map[0x38] == 0x11 && map[0x3D] == 0x66 && map[0x3E] == 0xFF);
+    }
+
     std::puts("Production hardware contract: PASS (descriptor ABI, links, queues, registers, tables, DMA limits)");
 }

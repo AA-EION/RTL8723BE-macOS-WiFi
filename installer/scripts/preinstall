@@ -1,0 +1,8 @@
+#!/bin/bash
+# Stop the running driver (if any) so the new version can be loaded.
+/usr/bin/killall RTL8723BEWirelessUtility rtl8723be_cli 2>/dev/null || true
+if /usr/bin/kmutil showloaded 2>/dev/null | /usr/bin/grep -q com.rtl8723be.macos.wifi; then
+    /usr/bin/kmutil unload -b com.rtl8723be.macos.wifi 2>/dev/null || \
+        echo "RTL8723BE: previous driver still in use; the new one takes over after a restart."
+fi
+exit 0

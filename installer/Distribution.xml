@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>RTL8723BE Wi-Fi for macOS</title>
+    <welcome file="welcome.txt" mime-type="text/plain"/>
+    <license file="LICENCE.rtlwifi_firmware.txt" mime-type="text/plain"/>
+    <conclusion file="conclusion.txt" mime-type="text/plain"/>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="x86_64"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.rtl8723be.macos.wifi.pkg"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.rtl8723be.macos.wifi.pkg" visible="false">
+        <pkg-ref id="com.rtl8723be.macos.wifi.pkg"/>
+    </choice>
+    <pkg-ref id="com.rtl8723be.macos.wifi.pkg" version="__VERSION__" onConclusion="none">RTL8723BE-component.pkg</pkg-ref>
+</installer-gui-script>

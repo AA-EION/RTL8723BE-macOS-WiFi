@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Realtek RTL8723BE Register Map (16KB BAR2 MMIO aperture)
+// Realtek RTL8723BE Register Map (16KB BAR2 MMIO aperture).
+// Addresses follow Linux drivers/net/wireless/realtek/rtlwifi/rtl8723be/reg.h.
 #define REG_SYS_ISO_CTRL         0x0000 // 16-bit
 #define REG_SYS_FUNC_EN          0x0002 // 16-bit
 #define REG_APS_FSMCO            0x0004 // 16-bit
@@ -13,11 +14,16 @@
 #define REG_9346CR               0x000A // 8-bit
 #define REG_RSV_CTRL             0x001C // 16-bit
 #define REG_RF_CTRL              0x001F // 8-bit
+#define REG_AFE_XTAL_CTRL        0x0024 // 32-bit (crystal/AFE; NOT the crystal-cap register)
+#define REG_MAC_PHY_CTRL         0x002C // 32-bit (crystal cap lives in bits [23:12])
 #define REG_MULTI_FUNC_CTRL      0x0068 // 8-bit
 #define REG_HWSEQ_CTRL           0x0423 // 8-bit
 #define REG_EFUSE_CTRL           0x0030 // 32-bit
 #define REG_EFUSE_TEST           0x0034 // 32-bit
 #define REG_GPIO_MUXCFG          0x0040 // 16-bit
+#define REG_LEDCFG0              0x004C
+#define REG_LEDCFG1              0x004D
+#define REG_LEDCFG2              0x004E
 #define REG_HSIMR                0x0058 // 32-bit
 #define REG_HSISR                0x005C // 32-bit
 #define REG_MCUFWDL              0x0080 // 32-bit
@@ -27,7 +33,94 @@
 #define REG_HIMRE                0x00B8 // 32-bit (Host Interrupt Mask Extension)
 #define REG_HISRE                0x00BC // 32-bit (Host Interrupt Status Extension)
 #define REG_EFUSE_ACCESS         0x00CF // 8-bit (0x69 enable, 0x00 disable)
+#define REG_SYS_CFG              0x00F0 // 32-bit
+#define REG_SYS_CFG1             0x00FC // 32-bit
 #define REG_CR                   0x0100 // 16-bit (Command Register)
+#define REG_MSR                  0x0102 // 8-bit (network type)
+#define REG_PBP                  0x0104
+#define REG_TRXDMA_CTRL          0x010C
+#define REG_TRXFF_BNDY           0x0114
+#define REG_FWIMR                0x0130
+#define REG_MCUTST_1             0x01C0
+#define REG_RQPN                 0x0200
+#define REG_TDECTRL              0x0208
+#define REG_RQPN_NPQ             0x0214
+#define REG_RXDMA_CONTROL        0x0286
+#define REG_RXPKT_NUM            0x0287
+#define REG_FWHW_TXQ_CTRL        0x0420
+#define REG_TXPKTBUF_BCNQ_BDNY   0x0424
+#define REG_TXPKTBUF_MGQ_BDNY    0x0425
+#define REG_RL                   0x042A
+#define REG_DARFRC               0x0430
+#define REG_RARFRC               0x0438
+#define REG_RRSR                 0x0440
+#define REG_ARFR0                0x0444
+#define REG_ARFR1                0x044C
+#define REG_AMPDU_MAX_TIME       0x0456
+#define REG_FAST_EDCA_CTRL       0x0460
+#define REG_HT_SINGLE_AMPDU      0x04C7
+#define REG_MAX_AGGR_NUM         0x04CA
+#define REG_TXPAUSE              0x0522
+#define REG_TBTT_PROHIBIT        0x0540
+#define REG_NAV_PROT_LEN         0x0546
+#define REG_BCN_CTRL             0x0550
+#define REG_SECONDARY_CCA_CTRL   0x0577
+#define REG_BWOPMODE             0x0603
+#define REG_RX_PKT_LIMIT         0x060C
+#define REG_RX_DRVINFO_SZ        0x060F
+#define REG_MACID                0x0610
+#define REG_BSSID                0x0618
+#define REG_NAV_UPPER            0x0652
+#define REG_RXFLTMAP0            0x06A0
+#define REG_RXFLTMAP1            0x06A2
+#define REG_RXFLTMAP2            0x06A4
+
+// Baseband / PHY registers
+#define RFPGA0_RFMOD             0x0800
+#define RFPGA0_XA_HSSIPARAMETER1 0x0820
+#define RFPGA0_XA_HSSIPARAMETER2 0x0824
+#define RFPGA0_XA_RFINTERFACEOE  0x0860
+#define RFPGA0_XAB_RFINTERFACESW 0x0870
+#define RFPGA0_XA_LSSIREADBACK   0x08A0
+#define TRANSCEIVEA_HSPI_READBACK 0x08B8
+#define RFPGA1_RFMOD             0x0900
+#define ROFDM0_XAAGCCORE1        0x0C50
+#define RTXAGC_A_RATE18_06       0x0E00
+#define RTXAGC_A_RATE54_24       0x0E04
+#define RTXAGC_A_CCK1_MCS32      0x0E08
+#define RTXAGC_A_MCS03_MCS00     0x0E10
+#define RTXAGC_A_MCS07_MCS04     0x0E14
+#define RTXAGC_B_CCK11_A_CCK2_11 0x086C
+#define BLSSIREADADDRESS         0x7F800000U
+#define BLSSIREADEDGE            0x80000000U
+#define BLSSIREADBACKDATA        0x000FFFFFU
+#define BRFSI_RFENV              0x10U
+#define B3WIREADDRESSLENGTH      0x400U
+#define B3WIREDATALENGTH         0x800U
+#define RF_CHNLBW                0x18
+
+// RCR bits (Linux rtl8723be/reg.h)
+#define RCR_APPFCS               (1U << 31)
+#define RCR_APP_MIC              (1U << 30)
+#define RCR_APP_ICV              (1U << 29)
+#define RCR_APP_PHYST_RXFF       (1U << 28)
+#define RCR_HTC_LOC_CTRL         (1U << 14)
+#define RCR_AMF                  (1U << 13)
+#define RCR_ACF                  (1U << 12)
+#define RCR_ADF                  (1U << 11)
+#define RCR_AICV                 (1U << 9)
+#define RCR_ACRC32               (1U << 8)
+#define RCR_CBSSID_BCN           (1U << 7)
+#define RCR_CBSSID_DATA          (1U << 6)
+#define RCR_AB                   (1U << 3)
+#define RCR_AM                   (1U << 2)
+#define RCR_APM                  (1U << 1)
+#define RCR_AAP                  (1U << 0)
+// Linux sw.c receive_config with ACRC32/AICV cleared as in rtl8723be_hw_init().
+#define RTL8723BE_RCR_DEFAULT    (RCR_APPFCS | RCR_APP_MIC | RCR_APP_ICV | RCR_APP_PHYST_RXFF | \
+                                  RCR_HTC_LOC_CTRL | RCR_AMF | RCR_ACF | RCR_ADF | \
+                                  RCR_AB | RCR_AM | RCR_APM)
+#define RTL8723BE_TCR_DEFAULT    ((1U << 9) | (1U << 15) | (1U << 24) | (1U << 25))
 #define REG_C2HEVT_MSG_NORM      0x01A0 // 32-bit
 #define REG_C2HEVT_CLEAR         0x01AF // 8-bit
 #define REG_HMETFR               0x01CC // 32-bit
@@ -72,6 +165,20 @@
 #define IMR_BDOK                 (1U << 8)
 #define IMR_C2HCMD               (1U << 10)
 #define IMR_HSISR_IND            (1U << 15)
+#define IMR_PSTIMEOUT            (1U << 29)
+#define IMR_RXFOVW               (1U << 8)  // in HIMRE/HISRE
+// Linux rtl8723be sw.c irq_mask[0] / irq_mask[1]
+#define RTL8723BE_IMR_DEFAULT    (IMR_PSTIMEOUT | IMR_HSISR_IND | IMR_C2HCMD | IMR_HIGHDOK | \
+                                  IMR_MGNTDOK | IMR_BKDOK | IMR_BEDOK | IMR_VIDOK | \
+                                  IMR_VODOK | IMR_RDU | IMR_ROK)
+#define RTL8723BE_IMRE_DEFAULT   IMR_RXFOVW
+
+// TX descriptor rate codes (DESC92C_RATE*)
+#define DESC_RATE1M              0x00
+#define DESC_RATE11M             0x03
+#define DESC_RATE6M              0x04
+#define DESC_RATE24M             0x08
+#define DESC_RATE54M             0x0B
 
 // Power States
 enum RTLPowerState {
@@ -159,6 +266,18 @@ struct alignas(4) TxDescPci {
     uint8_t get_queuesel() const { return (uint8_t)((dw1 >> 8) & 0x1FU); }
     void set_queuesel(uint8_t q) { dw1 = (dw1 & ~(0x1FU << 8)) | (((uint32_t)q & 0x1FU) << 8); }
 
+    // Remaining fields used by Linux rtl8723be_tx_fill_desc() (trx.h bit positions).
+    void set_bmc(bool v) { if (v) dw0 |= (1U << 24); else dw0 &= ~(1U << 24); }
+    void set_macid(uint8_t id) { dw1 = (dw1 & ~0x7FU) | (id & 0x7FU); }
+    void set_rate_id(uint8_t id) { dw1 = (dw1 & ~(0x1FU << 16)) | ((uint32_t)(id & 0x1FU) << 16); }
+    void set_use_rate(bool v) { if (v) dw3 |= (1U << 8); else dw3 &= ~(1U << 8); }
+    void set_disable_fb(bool v) { if (v) dw3 |= (1U << 10); else dw3 &= ~(1U << 10); }
+    void set_tx_rate(uint8_t r) { dw4 = (dw4 & ~0x7FU) | (r & 0x7FU); }
+    void set_data_rate_fb_limit(uint8_t l) { dw4 = (dw4 & ~(0x1FU << 8)) | ((uint32_t)(l & 0x1FU) << 8); }
+    void set_rts_rate_fb_limit(uint8_t l) { dw4 = (dw4 & ~(0xFU << 13)) | ((uint32_t)(l & 0xFU) << 13); }
+    void set_hwseq_en(bool v) { if (v) dw8 |= (1U << 15); else dw8 &= ~(1U << 15); }
+    void set_seq(uint16_t s) { dw9 = (dw9 & ~(0xFFFU << 12)) | ((uint32_t)(s & 0xFFFU) << 12); }
+
     uint64_t get_buffer_addr() const {
         return ((uint64_t)dw10_txbuffaddr) | (((uint64_t)dw11_txbuffaddr64) << 32);
     }
@@ -227,6 +346,9 @@ struct alignas(4) RxDesc32 {
     bool get_own() const { return (dw0 & (1U << 31)) != 0; }
     void set_own(bool own) { if (own) dw0 |= (1U << 31); else dw0 &= ~(1U << 31); }
 
+    bool get_physt() const { return (dw0 & (1U << 26)) != 0; }
+    uint8_t get_rxmcs() const { return (uint8_t)(dw3 & 0x7FU); }
+
     uint64_t get_buffer_addr() const {
         return ((uint64_t)dw6_bufferaddress) | (((uint64_t)dw7_bufferaddress64) << 32);
     }
@@ -235,6 +357,57 @@ struct alignas(4) RxDesc32 {
         dw7_bufferaddress64 = (uint32_t)((addr >> 32) & 0xFFFFFFFFULL);
     }
 };
+
+// eFuse logical map layout (Linux rtl8723be/reg.h)
+#define RTL8723BE_EFUSE_MAP_LEN        512
+#define RTL8723BE_EFUSE_REAL_LEN       256   // physical bytes holding the WLAN PG stream
+#define RTL8723BE_EFUSE_MAX_SECTION    64
+#define RTL8723BE_EEPROM_ID            0x8129
+#define EEPROM_TX_PWR_INX              0x10
+#define EEPROM_CHANNELPLAN             0xB8
+#define EEPROM_XTAL_8723BE             0xB9
+#define EEPROM_THERMAL_METER           0xBA
+#define EEPROM_RF_BOARD_OPTION         0xC1
+#define EEPROM_RF_BT_SETTING_8723B     0xC3
+#define EEPROM_CUSTOMER_ID             0xC5
+#define EEPROM_MAC_ADDR                0xD0
+#define EEPROM_VID                     0xD6
+#define EEPROM_DID                     0xD8
+#define EEPROM_SVID                    0xDA
+#define EEPROM_SMID                    0xDC
+
+// Decode a Realtek physical eFuse PG stream into the 512-byte logical map
+// (Linux efuse.c read_efuse(), including 2-byte extended headers).
+// Returns the number of physical bytes consumed.
+inline size_t rtlEfuseDecode(const uint8_t *phys, size_t physLen, uint8_t *logical, size_t logicalLen) {
+    for (size_t i = 0; i < logicalLen; ++i) logical[i] = 0xFF;
+    size_t addr = 0;
+    while (addr < physLen && phys[addr] != 0xFF) {
+        uint8_t hdr = phys[addr++];
+        uint8_t section, wren;
+        if ((hdr & 0x1F) == 0x0F) { // extended header
+            if (addr >= physLen) break;
+            uint8_t hdr2 = phys[addr++];
+            if ((hdr2 & 0x0F) == 0x0F) continue; // invalid/unused extended header
+            section = (uint8_t)(((hdr2 & 0xF0) >> 1) | ((hdr & 0xE0) >> 5));
+            wren = hdr2 & 0x0F;
+        } else {
+            section = (hdr >> 4) & 0x0F;
+            wren = hdr & 0x0F;
+        }
+        for (int w = 0; w < 4; ++w, wren >>= 1) {
+            if (wren & 0x01) continue; // 0 = word present
+            if (addr + 1 >= physLen) return physLen;
+            size_t off = (size_t)section * 8 + (size_t)w * 2;
+            if (section < RTL8723BE_EFUSE_MAX_SECTION && off + 1 < logicalLen) {
+                logical[off] = phys[addr];
+                logical[off + 1] = phys[addr + 1];
+            }
+            addr += 2;
+        }
+    }
+    return addr;
+}
 
 // eFuse Calibration Structure
 struct CalibData {
@@ -249,6 +422,11 @@ struct CalibData {
     uint16_t did;
     uint16_t svid;
     uint16_t smid;
+    uint8_t  customer_id;
+    uint8_t  bt_setting;      // EEPROM 0xC3: bit0 = 2 antennas, bit6 = single-ant path is AUX
+    uint8_t  package_type;    // 0 default, 1 QFN68, 2 TFBGA90, 3 TFBGA80, 4 TFBGA79
+    bool     autoload_ok;     // EEPROM ID == 0x8129
+    uint16_t efuse_used;
 };
 
 #endif // _RTL8723BE_HW_HPP_

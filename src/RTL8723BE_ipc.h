@@ -14,8 +14,52 @@ enum RTL8723BEMethodIndex {
     kMethodDisconnect     = 3,
     kMethodGetStatus      = 4,
     kMethodSetAntenna     = 5,
-    kNumberOfMethods      = 6
+    // Diagnostics (appended; indices above are ABI-stable for the GUI).
+    kMethodReadReg        = 6,  // in: addr, width(1/2/4)   out: value
+    kMethodWriteReg       = 7,  // in: addr, width, value   (administrator only)
+    kMethodReadRF         = 8,  // in: rf offset            out: 20-bit value
+    kMethodWriteRF        = 9,  // in: rf offset, value     (administrator only)
+    kMethodGetDiag        = 10, // out: RTL8723BEDiag
+    kMethodIQCalibrate    = 11, // out: bit0 path A (S1), bit1 path B (S0) calibrated (administrator only)
+    kNumberOfMethods      = 12
 };
+
+struct RTL8723BEDiag {
+    uint32_t version;          // RTL8723BE_DIAG_VERSION
+    uint32_t init_stage;       // last completed hardware-init stage (see kext log)
+    uint32_t fw_version;       // (version << 16) | subversion
+    uint32_t mcufwdl;          // REG_MCUFWDL
+    uint32_t cr;               // REG_CR
+    uint32_t rcr;              // REG_RCR
+    uint32_t himr, hisr;
+    uint32_t rxdma_ctrl;       // REG_RXDMA_CONTROL (0x286) | RXPKT_NUM (0x287) << 8
+    uint32_t rf_chnlbw;        // RF 0x18
+    uint32_t rf_mode;          // RF 0x00
+    uint32_t bb_ofdm_cca;      // OFDM CCA hits (0xDA0[15:0]) - BB detected OFDM preambles
+    uint32_t bb_cck_cca;       // CCK CCA hits (0xA60) - BB detected CCK/DSSS preambles
+    uint32_t reg_948, reg_92c, reg_4c, reg_765, reg_76e, reg_67;
+    uint32_t interrupts;       // filter hits
+    uint32_t rx_desc_done;     // descriptors returned by hardware
+    uint32_t rx_mgmt, rx_beacons, rx_data, rx_ctrl, rx_crc_err, rx_dropped;
+    uint32_t tx_submitted, tx_ring_full;
+    uint16_t efuse_used;
+    uint8_t  efuse_autoload_ok;
+    uint8_t  package_type;
+    uint8_t  ant_num;          // 1 or 2 (from eFuse 0xC3 / boot-arg)
+    uint8_t  ant_path;         // 1 = main (S1), 2 = aux (S0)
+    uint8_t  channel;
+    uint8_t  reserved;
+    uint16_t svid, smid;
+    // v2: per-rate RX quality and unicast data path accounting
+    uint32_t rx_ok_cck, rx_ok_ofdm, rx_ok_ht;      // good frames by modulation
+    uint32_t rx_crc_cck, rx_crc_ofdm, rx_crc_ht;   // CRC failures by modulation (needs RCR ACRC32)
+    uint32_t uc_data_rx;       // protected data frames from our BSSID to our MAC
+    uint32_t uc_delivered;     // ...decrypted and handed to the stack
+    uint32_t uc_replay, uc_mic_fail, bc_delivered, bc_mic_fail;
+    uint32_t last_uc_fc_pn_lo; // FC(16) | PN[15:0] of the last unicast-to-us frame
+    uint32_t last_uc_rate_len; // rxmcs(8) << 16 | len
+};
+#define RTL8723BE_DIAG_VERSION 2
 
 enum RTL8723BEWifiState {
     kRTLStateDisconnected   = 0,
