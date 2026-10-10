@@ -1,21 +1,20 @@
 RTL8723BE Wi-Fi for macOS
+By Issen Software Group
 
 This installs:
-  • RTL8723BE Wireless Utility.app        → /Applications
-  • RTL8723BEWiFi.kext (driver)             → /Library/Extensions
-  • rtl8723be_cli (command-line tool)        → /usr/local/bin
+  • RTL8723BE Wireless Utility.app (includes the driver)  → /Applications
+  • rtl8723be_cli (command-line tool)                      → /usr/local/bin
 
-Made by Issen Software Group. App and tools: MIT. Kernel driver: GPL-2.0-only
-(ported from Linux). Source: https://github.com/AA-EION/RTL8723BE-macOS-WiFi
+The driver is loaded by the app after you log in. It is never installed where macOS
+would start it during boot, and nothing touches NVRAM or your EFI partition.
 
 Supported hardware: Realtek RTL8723BE PCIe Wi-Fi (PCI ID 10ec:b723), 2.4 GHz, WPA2-PSK.
 Tested on an HP laptop (subsystem 103c:804c) with macOS 26 (Darwin 25) under OpenCore.
 
 Before installing:
   • The driver only starts when the boot argument  rtl8723be_experimental=1  is set
-    (add it to NVRAM boot-args in your OpenCore config.plist). This installer does not
-    modify NVRAM or your EFI.
+    (add it to NVRAM boot-args in your OpenCore config.plist).
   • Kernel extension loading must be allowed by your SIP/OpenCore setup.
 
-After installing, macOS asks you to allow the driver in
-System Settings → Privacy & Security, then to restart.
+App and tools: MIT. Kernel driver: GPL-2.0-only (ported from Linux).
+Source: https://github.com/AA-EION/RTL8723BE-macOS-WiFi

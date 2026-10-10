@@ -44,15 +44,15 @@ codesign --force --deep --sign - "${APP_BUNDLE}"
 codesign --verify --deep --strict "${APP_BUNDLE}"
 echo "[+] Signed and verified ${APP_BUNDLE}"
 
-# 7. Build the installer package (app -> /Applications, kext -> /Library/Extensions,
-#    CLI -> /usr/local/bin). Nothing touches NVRAM or the EFI partition.
+# 7. Build the installer package (app -> /Applications, CLI -> /usr/local/bin).
+#    The kext stays inside the app and is loaded after login only; it is never installed
+#    where macOS would start it at boot. Nothing touches NVRAM or the EFI partition.
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${PROJECT_DIR}/src/Info.plist")"
 PKG_WORK="${PROJECT_DIR}/build/pkg"
 PKG_ROOT="${PKG_WORK}/root"
 rm -rf "${PKG_WORK}"
-mkdir -p "${PKG_ROOT}/Applications" "${PKG_ROOT}/Library/Extensions" "${PKG_ROOT}/usr/local/bin" "${PKG_WORK}/resources"
+mkdir -p "${PKG_ROOT}/Applications" "${PKG_ROOT}/usr/local/bin" "${PKG_WORK}/resources"
 ditto "${APP_BUNDLE}" "${PKG_ROOT}/Applications/${APP_NAME}"
-ditto "${PROJECT_DIR}/build/RTL8723BEWiFi.kext" "${PKG_ROOT}/Library/Extensions/RTL8723BEWiFi.kext"
 cp "${PROJECT_DIR}/tools/rtl8723be_cli" "${PKG_ROOT}/usr/local/bin/rtl8723be_cli"
 pkgbuild --analyze --root "${PKG_ROOT}" "${PKG_WORK}/component.plist"
 # Never let Installer "relocate" the app onto some other copy with the same bundle ID.

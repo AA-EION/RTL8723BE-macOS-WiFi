@@ -37,13 +37,12 @@ if [[ "${VERSION}" != '1.3.0' ]]; then
     exit 2
 fi
 /usr/bin/codesign --verify --strict "${KEXT_SOURCE}"
-INSTALLED=/Library/Extensions/RTL8723BEWiFi.kext
-if [[ -d "${INSTALLED}" ]]; then
-    # Installed by the .pkg: load that copy so macOS tracks a single approved path.
-    echo "Loading installed driver: ${INSTALLED}"
-    /usr/bin/kmutil load -p "${INSTALLED}"
-    echo "Load request returned. Check driver status and kernel logs."
-    exit 0
+# Always load a temporary copy: /private/tmp is cleared at every restart, so the driver
+# can never start during boot (boot-time start right after the FileVault password freezes
+# the machine). Remove any boot-time copy left behind by the withdrawn first 1.3.0 package.
+if [[ -d /Library/Extensions/RTL8723BEWiFi.kext ]]; then
+    /bin/rm -rf /Library/Extensions/RTL8723BEWiFi.kext
+    echo "Removed /Library/Extensions/RTL8723BEWiFi.kext (boot-time copy)."
 fi
 TEST_DIR="$(/usr/bin/mktemp -d /private/tmp/rtl8723be-test.XXXXXX)"
 /usr/bin/ditto "${KEXT_SOURCE}" "${TEST_DIR}/RTL8723BEWiFi.kext"

@@ -57,24 +57,29 @@ Tested on an HP laptop (`103c:804c`) with macOS 26 Tahoe: WPA2 connection, DHCP,
    The driver won't start without it.
 3. Download the latest **.dmg** from the
    [Releases page](https://github.com/AA-EION/RTL8723BE-macOS-WiFi/releases), open it and run
-   **Install RTL8723BE WiFi.pkg**.
-4. When macOS asks, go to **System Settings › Privacy & Security**, click **Allow** for the
-   RTL8723BE driver, and restart.
-5. Open **RTL8723BE Wireless Utility** from Applications, click **Scan**, pick your network and
-   enter its password.
+   **Install RTL8723BE WiFi.pkg**. It installs the app (with the driver inside) and the
+   command-line tool.
+4. Open **RTL8723BE Wireless Utility** and click **Load Driver…** (it asks for your password).
+5. The first time, macOS asks you to allow the driver: go to
+   **System Settings › Privacy & Security**, click **Allow**, restart, and click
+   **Load Driver…** again after logging in.
+6. Click **Scan**, pick your network and enter its password.
 
-That's it. From now on the driver starts with your Mac.
+After each restart, open the app and click **Load Driver…** again.
+
+> **Why not load it automatically at startup?** Starting the driver during boot, right after the
+> FileVault password, freezes the Mac. Loading it after login is reliable, so the driver is never
+> installed where macOS would start it at boot. Don't copy the kext to `/Library/Extensions` and
+> don't add it to OpenCore's `Kernel › Add` list.
 
 > The installer isn't signed by Apple, so macOS may refuse to open it the first time.
 > Right-click it and choose **Open**, or go to **System Settings › Privacy & Security** and click
 > **Open Anyway**.
 
-> Don't add the kext to OpenCore's `Kernel › Add` list. Install it with the package instead.
-
 ### Updating
 
-Download the new .dmg and run the package again. macOS asks you to allow the new driver once and
-to restart.
+Download the new .dmg and run the package again. A new driver version has to be allowed once in
+Privacy & Security, followed by a restart.
 
 ### Uninstalling
 
@@ -113,7 +118,7 @@ rtl8723be_cli disconnect
 
 | Problem | What to do |
 |---|---|
-| **The app says the driver isn't loaded** | Check the three steps on the app's welcome screen. Most often the boot flag is missing, or the driver is waiting for **Allow** in Privacy & Security plus a restart. |
+| **The app says the driver isn't loaded** | Check the three steps on the app's welcome screen. Click **Load Driver…**; it has to be loaded after every restart. If it still fails, the boot flag may be missing, or the driver is waiting for **Allow** in Privacy & Security plus a restart. |
 | **Very few networks, or weak signal** | The antenna is probably on the other port. Go to **Settings › Antenna** and try the other option, or add `rtl8723be_ant_sel=1` (Aux) or `=2` (Main) to `boot-args`. |
 | **Can't join a network** | Only WPA2 Personal (WPA2-PSK) on 2.4 GHz is supported. Open, WEP, WPA3, enterprise and 5 GHz networks won't work. Double-check the password. |
 | **Connected, but pages don't load** | If you're also on Ethernet, macOS may prefer it. Check the order in **System Settings › Network**. |
@@ -135,8 +140,9 @@ No. This project only covers the Wi-Fi side of the card.
 The driver currently talks to your router with 802.11g speeds. 802.11n support is planned.
 
 **Is it safe?**
-The driver refuses to start unless you add the boot flag yourself, and the installer never
-touches your EFI partition or NVRAM. It's still a kernel extension, so keep a bootable backup.
+The driver refuses to start unless you add the boot flag yourself, it is only loaded after you
+log in, and the installer never touches your EFI partition or NVRAM. It's still a kernel
+extension, so keep a bootable backup (for example an OpenCore USB without the boot flag).
 
 **Which laptops work?**
 Any with an RTL8723BE card (PCI ID `10ec:b723`). Check in **System Information › PCI**, or run

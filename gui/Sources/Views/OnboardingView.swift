@@ -39,8 +39,8 @@ struct OnboardingView: View {
                             : "Add rtl8723be_experimental=1 to boot-args in your OpenCore config.plist, then restart. "
                               + "This app never changes NVRAM or your EFI.")
                     step(3, done: model.driverLoaded, title: "Driver running",
-                         detail: "Load the driver now. If macOS asks, allow it in System Settings › Privacy & Security "
-                               + "and restart once; after that it starts with your Mac.")
+                         detail: "Load the driver after each login. The first time (and after updates) macOS asks you "
+                               + "to allow it in System Settings › Privacy & Security; allow it, restart, and load it again.")
                 }
                 .frame(maxWidth: 560)
 
