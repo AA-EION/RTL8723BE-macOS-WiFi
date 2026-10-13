@@ -20,8 +20,8 @@ minos() {
     otool -l "$1" 2>/dev/null | awk '
         /cmd LC_BUILD_VERSION/      { mode = "build" }
         /cmd LC_VERSION_MIN_MACOSX/ { mode = "min" }
-        mode == "build" && $1 == "minos"   { print $2; exit }
-        mode == "min"   && $1 == "version" { print $2; exit }'
+        !done && mode == "build" && $1 == "minos"   { print $2; done = 1 }
+        !done && mode == "min"   && $1 == "version" { print $2; done = 1 }'
 }
 
 # a <= b for dotted versions
@@ -46,7 +46,9 @@ kext)
     bin="$kext/Contents/MacOS/RTL8723BEWiFi"
     [[ -f "$bin" ]] || fail "missing $bin"
     check_arch "$bin"
-    check_minos "$bin" 10.13
+    # A linked kext carries no LC_BUILD_VERSION / LC_VERSION_MIN, so check the objects it was built from.
+    if [[ -n "$(minos "$bin")" ]]; then check_minos "$bin" 10.13; fi
+    for o in build/RTL8723BE*.o; do check_minos "$o" 10.13; done
     # A kext may only reference kernel symbols through com.apple.kpi.* / iokit families.
     bad="$(otool -L "$bin" 2>/dev/null | tail -n +2 | grep -v '^[[:space:]]*$' || true)"
     [[ -z "$bad" ]] || fail "kext links user-space libraries: $bad"
