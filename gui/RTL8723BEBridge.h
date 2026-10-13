@@ -66,6 +66,40 @@ static inline int rtl_get_diag(io_connect_t conn, struct RTL8723BEDiag *outDiag)
     return (kr == KERN_SUCCESS) ? 0 : (int)kr;
 }
 
+static inline int rtl_get_link_info(io_connect_t conn, struct RTL8723BELinkInfo *out) {
+    size_t size = sizeof(*out);
+    return (int)IOConnectCallStructMethod(conn, kMethodGetLinkInfo, NULL, 0, out, &size);
+}
+static inline int rtl_set_options(io_connect_t conn, uint32_t options) {
+    uint64_t input = options;
+    return (int)IOConnectCallScalarMethod(conn, kMethodSetOptions, &input, 1, NULL, NULL);
+}
+/* Inspect our USB device, without issuing any HCI commands or changing its state. */
+static inline int rtl_bluetooth_present(void) {
+    io_iterator_t iterator = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostDevice"), &iterator)) return 0;
+    io_service_t device;
+    int result = 0;
+    while ((device = IOIteratorNext(iterator))) {
+        CFTypeRef vendor = IORegistryEntryCreateCFProperty(device, CFSTR("idVendor"), kCFAllocatorDefault, 0);
+        CFTypeRef product = IORegistryEntryCreateCFProperty(device, CFSTR("idProduct"), kCFAllocatorDefault, 0);
+        int v = 0, p = 0;
+        if (vendor && CFGetTypeID(vendor) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)vendor, kCFNumberIntType, &v);
+        if (product && CFGetTypeID(product) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)product, kCFNumberIntType, &p);
+        if (v == 0x0bda && (p == 0xb006 || p == 0xb728 || p == 0xb720 || p == 0x8723)) {
+            result |= 1;
+            CFTypeRef fw = IORegistryEntryCreateCFProperty(device, CFSTR("RTL8723BluetoothFirmwareLoaded"), kCFAllocatorDefault, 0);
+            if (fw && CFGetTypeID(fw) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)fw)) result |= 2;
+            if (fw) CFRelease(fw);
+        }
+        if (vendor) CFRelease(vendor);
+        if (product) CFRelease(product);
+        IOObjectRelease(device);
+    }
+    IOObjectRelease(iterator);
+    return result;
+}
+
 /* Copies the BSD name (e.g. "en2") of the driver's network interface. */
 static inline int rtl_copy_bsd_name(char *out, size_t outLen) {
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("RTL8723BE"));

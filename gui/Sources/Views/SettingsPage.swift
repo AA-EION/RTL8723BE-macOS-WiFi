@@ -16,8 +16,11 @@ struct SettingsPage: View {
     var body: some View {
         Form {
             driverSection
+            performanceSection
+            BluetoothCard(model: model)
             antennaSection
             commandLineSection
+            savedNetworksSection
             generalSection
             donationSection
             aboutSection
@@ -57,6 +60,28 @@ struct SettingsPage: View {
         }
     }
 
+    private var performanceSection: some View {
+        Section("Wi-Fi performance") {
+            if let info = model.linkInfo {
+                Toggle("802.11n (HT20)", isOn: Binding(
+                    get: { info.options & UInt32(kRTLOptionHT.rawValue) != 0 },
+                    set: { model.setDriverOption(UInt32(kRTLOptionHT.rawValue), enabled: $0) }))
+                Toggle("Hardware transmit encryption", isOn: Binding(
+                    get: { info.options & UInt32(kRTLOptionTxCrypto.rawValue) != 0 },
+                    set: { model.setDriverOption(UInt32(kRTLOptionTxCrypto.rawValue), enabled: $0) }))
+                Toggle("Share the single antenna with Bluetooth", isOn: Binding(
+                    get: { info.options & UInt32(kRTLOptionBluetoothCoexist.rawValue) != 0 },
+                    set: { model.setDriverOption(UInt32(kRTLOptionBluetoothCoexist.rawValue), enabled: $0) }))
+                LabeledContent("Radio mode", value: info.ht20 != 0 ? "802.11n · HT20" : "802.11b/g")
+                LabeledContent("Rate control", value: info.firmware_rate_control != 0 ? "Firmware" : "Driver")
+                LabeledContent("Transmit encryption", value: info.tx_crypto != 0 ? "Hardware CCMP" : "Software CCMP")
+            }
+            Text("Change options while disconnected. Hardware encryption and single-antenna Bluetooth sharing are experimental; receive authentication and replay protection remain in software.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .disabled(model.phase != .disconnected || model.isBusy)
+    }
+
     // MARK: Antenna
 
     private var antennaSection: some View {
@@ -90,6 +115,21 @@ struct SettingsPage: View {
             Text("/usr/local/bin/rtl8723be_cli")
                 .font(.caption.monospaced())
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var savedNetworksSection: some View {
+        Section("Saved networks") {
+            Toggle("Automatically join remembered networks", isOn: $model.autoJoin)
+            ForEach(model.savedNetworks, id: \.self) { ssid in
+                HStack {
+                    Text(ssid)
+                    Spacer()
+                    Button("Forget") { model.forgetNetwork(ssid) }
+                }
+            }
+            Text("Passwords are stored in your login Keychain after a successful connection. Disconnect pauses automatic joining until you join manually or reopen the app.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 

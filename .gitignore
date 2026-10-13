@@ -11,3 +11,21 @@ build/dmg_staging/
 .DS_Store
 build/.DS_Store
 build/pkg/
+
+# Reproducible feature build products and downloaded upstream references
+build/*.log
+build/test_protocol
+build/test_bluetooth_firmware
+build/test_credentials
+build/swift-module-cache/
+build/RTL8723BE_protocol.o
+build/RTL8723BluetoothFirmware.o
+build/bt_*.o
+build/bt_firmware.cpp
+build/RTL8723BluetoothFirmware.kext/
+build/RTL8723BEWirelessUtility
+.references/
+
+# Local emergency audio recovery only; never ship with the RTL installer
+build/VoodooHDA-audio-recovery.kext/
+build/stop_rtl_and_reset_audio.sh

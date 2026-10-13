@@ -24,6 +24,7 @@
 #include "RTL8723BE_hw.hpp"
 #include "RTL8723BE_ipc.h"
 #include "RTL8723BE_crypto.hpp"
+#include "RTL8723BE_protocol.hpp"
 #include "RTL8723BE_tables.hpp"
 #include "RTL8723BE_firmware.hpp"
 
@@ -64,6 +65,7 @@ public:
     virtual bool start(IOService *provider) override;
     virtual void stop(IOService *provider) override;
     virtual void free() override;
+    virtual IOReturn setPowerState(unsigned long state, IOService *device) override;
 
     // IOEthernetController Interface
     virtual IOReturn enable(IONetworkInterface *netif) override;
@@ -89,6 +91,9 @@ public:
     IOReturn debugWriteRF(uint32_t offset, uint32_t value);
     IOReturn getDiag(RTL8723BEDiag *outDiag);
     IOReturn runIQK(uint32_t *outMask);
+    IOReturn getLinkInfo(RTL8723BELinkInfo *out);
+    IOReturn setOptions(uint32_t options);
+    bool installTxKey();
 
     // Hardware Register Accessors
     uint8_t  mmio_read8(uint32_t offset);
@@ -110,11 +115,13 @@ public:
     static bool interruptFilter(OSObject *owner, IOFilterInterruptEventSource *src);
     static void interruptAction(OSObject *owner, IOInterruptEventSource *src, int count);
     static void scanTimerAction(OSObject *owner, IOTimerEventSource *timer);
+    static void linkTimerAction(OSObject *owner, IOTimerEventSource *timer);
 
 private:
     // Gated entry points (run on the work loop)
     static IOReturn gatedScan(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
     static IOReturn gatedCall(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
+    static IOReturn gatedPower(OSObject *owner, void *state, void *, void *, void *);
     IOReturn quiesce(void *, void *, void *, void *);
 
     // Hardware initialization (ported from Linux rtl8723be_hw_init)
@@ -176,9 +183,13 @@ private:
     void handleAuthResponse(const uint8_t *frame, size_t len);
     void handleAssocResponse(const uint8_t *frame, size_t len);
     void handleEAPOLFrame(const uint8_t *frame, size_t len, size_t hdrLen);
+    void handleEAPOLKey(const uint8_t *eapol, size_t len);
+    void deliverMSDU(const uint8_t *data, size_t len, const uint8_t *da, const uint8_t *sa, bool multicast);
+    void configurePeer();
     IOReturn beginConnect();
     size_t buildRsnIE(uint8_t *out);
     void handleDeauthFrame(const uint8_t *frame, size_t len);
+    void handleActionFrame(const uint8_t *frame, size_t len);
 
     // Challenger Fixes Helpers
     void deauthTeardown();
@@ -192,6 +203,11 @@ private:
     IOCommandGate                 *fCommandGate;
     IOFilterInterruptEventSource  *fInterruptSource;
     IOTimerEventSource            *fScanTimer;
+    IOTimerEventSource            *fLinkTimer;
+    uint32_t                       fLinkTicks;
+    uint32_t                       fLastBSSActivity;
+    uint32_t                       fHandshakeDeadline;
+    int8_t                         fLinkRSSI;
     IOEthernetInterface           *fNetif;
     OSDictionary                  *fMediumDict;
     IOLock                        *fRFLock;
@@ -201,6 +217,9 @@ private:
     volatile uint32_t              fHIMRMask;
     volatile bool                  fInterruptEnabled;
     bool                           fHwReady;
+    bool                           fPMRegistered;
+    bool                           fSuspended;
+    bool                           fInterfaceEnabled;
     bool                           fFwReady;
     CalibData                      fCalib;
     uint32_t                       fInitStage;
@@ -236,16 +255,20 @@ private:
     // Cryptographic Keys & Nonces
     uint8_t                        fPMK[32];
     uint8_t                        fPTK[64]; // KCK(16), KEK(16), TK(16), etc.
-    uint8_t                        fGTK[16];
-    uint8_t                        fSNonce[32];
-    uint8_t                        fANonce[32];
+    rtl_wifi::Supplicant           fWPA;
+    rtl_wifi::Peer                 fPeer;
+    rtl_wifi::Peer                 fScanPeers[RTL8723BE_MAX_SCAN_APS];
+    uint8_t                        fDataRate;
+    uint8_t                        fRateID;
+    bool                           fFirmwareRA;
+    uint32_t                       fOptions;
+    bool                           fTxCrypto;
 
     // Challenger Fixes State
     bool                           fKeyInstalled;        // KRACK mitigation
-    uint64_t                       fLastReplayCounter;   // EAPOL replay counter
     uint64_t                       fTxPN;                // Transmit CCMP PN
     uint64_t                       fRxPtkPN[16];         // Per-TID Unicast PN
-    uint64_t                       fRxGtkPN[4];          // Per-KeyID Multicast/Broadcast PN
+    uint64_t                       fRxGtkPN[4][16];      // Per-KeyID, per-TID group PN (Linux mac80211/wpa.c)
 
     // Scan State & Cache
     RTL8723BEScanResults           fScanResults;
@@ -260,7 +283,7 @@ private:
     // Scratch buffers (kept off the 16 KB kernel stack)
     uint8_t                        fTxFrame[2048];
     uint8_t                        fTxPlain[1600];
-    uint8_t                        fRxPlain[2048];
+    uint8_t                        fRxPlain[4096];
     uint8_t                        fOutEth[1514];   // outputPacket() only
     uint8_t                        fOutFrame[2048]; // outputPacket() only
     uint16_t                       fAid;

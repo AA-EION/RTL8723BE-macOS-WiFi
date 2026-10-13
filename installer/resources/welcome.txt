@@ -1,20 +1,30 @@
-RTL8723BE Wi-Fi for macOS
+RTL8723BE Wi-Fi and Bluetooth for macOS — 1.4.0 development build
 By Issen Software Group
 
-This installs:
-  • RTL8723BE Wireless Utility.app (includes the driver)  → /Applications
-  • rtl8723be_cli (command-line tool)                      → /usr/local/bin
+Installs RTL8723BE Wireless Utility.app in /Applications, with separate Wi-Fi and
+Bluetooth firmware kexts, and rtl8723be_cli in /usr/local/bin.
+Both drivers are loaded after login. No EFI, NVRAM or USB-map changes are made.
 
-The driver is loaded by the app after you log in. It is never installed where macOS
-would start it during boot, and nothing touches NVRAM or your EFI partition.
+Wi-Fi: RTL8723BE PCIe 10ec:b723, WPA2 Personal/CCMP, b/g and experimental HT20.
+The app can save passwords in Keychain and auto-join saved networks.
+Optional hardware transmit encryption and single-antenna Bluetooth sharing are
+experimental. Full Wi-Fi 4 compliance is pending; see Feature Status.txt.
 
-Supported hardware: Realtek RTL8723BE PCIe Wi-Fi (PCI ID 10ec:b723), 2.4 GHz, WPA2-PSK.
-Tested on an HP laptop (subsystem 103c:804c) with macOS 26 (Darwin 25) under OpenCore.
+Wi-Fi startup requires rtl8723be_experimental=1 in current boot-args.
+Bluetooth manual loading uses a temporary upload opt-in and a correctly mapped internal
+USB port. On macOS 12+, install compatible Lilu/BlueToolFixup separately.
+Firmware upload and native Bluetooth pairing/audio/wake need hardware testing.
 
-Before installing:
-  • The driver only starts when the boot argument  rtl8723be_experimental=1  is set
-    (add it to NVRAM boot-args in your OpenCore config.plist).
-  • Kernel extension loading must be allowed by your SIP/OpenCore setup.
+Experimental 1.4.0 snapshot: a test host experienced uncontrollable internal-speaker
+noise following Bluetooth approval/restart. A later reboot stopped the noise but
+internal audio is unavailable. The cause is unresolved. Read Audio Incident.txt
+and Validation Record.txt before hardware testing; this is not a stable release.
 
-App and tools: MIT. Kernel driver: GPL-2.0-only (ported from Linux).
+Build target: x86_64 macOS 26.5 kernel SDK; GUI requires macOS 14+.
+The new development paths have host tests; prior 1.3.0 hardware results are not
+validation of this build. Kernel extension loading must be permitted by your setup.
+Keep manual post-login loading; this repository records a boot-time login freeze.
+
+App/tools: MIT. Wi-Fi driver: GPL-2.0-only with BSD/ISC adaptations.
+Bluetooth driver: GPL-2.0-or-later. Realtek firmware terms are included.
 Source: https://github.com/AA-EION/RTL8723BE-macOS-WiFi

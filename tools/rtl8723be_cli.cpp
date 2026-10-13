@@ -70,6 +70,35 @@ static int cmdStatus(io_connect_t conn) {
     return 0;
 }
 
+static int cmdLink(io_connect_t conn) {
+    RTL8723BELinkInfo info = {};
+    size_t size = sizeof(info);
+    kern_return_t rc = IOConnectCallStructMethod(conn, kMethodGetLinkInfo, nullptr, 0, &info, &size);
+    if (rc != KERN_SUCCESS || size != sizeof(info) || info.version != 1) {
+        fprintf(stderr, "Link information requires driver 1.4.0 (IOReturn 0x%08x).\n", rc);
+        return 1;
+    }
+    printf("Radio: %s; WMM: %s; short GI: %s; supported rate mask: 0x%08x\n",
+           info.ht20 ? "HT20 MCS0-7" : "802.11b/g", info.wmm ? "yes" : "no", info.short_gi ? "yes" : "no", info.rate_mask);
+    printf("Rate control: %s; transmit CCMP: %s; options: %u\n",
+           info.firmware_rate_control ? "firmware" : "descriptor fallback", info.tx_crypto ? "hardware" : "software", info.options);
+    printf("Maximum negotiated descriptor rate: %u (capability, not measured throughput)\n", info.max_rate);
+    return 0;
+}
+
+static int cmdOptions(io_connect_t conn, const char *argument) {
+    char *end = nullptr;
+    unsigned long value = argument ? strtoul(argument, &end, 0) : 8;
+    if (!argument || end == argument || *end || value > 7) {
+        fprintf(stderr, "Usage: options <0..7> (bit 1: HT20, bit 2: hardware TX CCMP, bit 4: Bluetooth PTA); disconnect first.\n");
+        return 1;
+    }
+    uint64_t input = value;
+    kern_return_t rc = IOConnectCallScalarMethod(conn, kMethodSetOptions, &input, 1, nullptr, nullptr);
+    if (rc != KERN_SUCCESS) { fprintf(stderr, "Cannot set options (IOReturn 0x%08x). Disconnect first.\n", rc); return 1; }
+    return cmdLink(conn);
+}
+
 static int cmdScan(io_connect_t conn) {
     printf("[*] Triggering 2.4 GHz active/passive scan across channels 1..13 on pci10ec,b723...\n");
     kern_return_t kr = IOConnectCallMethod(conn, kMethodScan, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr, nullptr);
@@ -99,7 +128,7 @@ static int cmdScan(io_connect_t conn) {
                bssidStr,
                ap.channel,
                ap.rssi,
-               ap.is_wpa2 ? "WPA2-PSK" : "OPEN");
+               ap.is_wpa2 ? "WPA2-PSK" : "OTHER");
     }
     printf("\nTotal discovered APs: %u\n", res.count);
     return 0;
@@ -277,6 +306,8 @@ static void printUsage(const char *prog) {
     printf("Usage: %s <command> [args]\n\n", prog);
     printf("Commands:\n");
     printf("  status                           Display RTL8723BE hardware, MAC, channel, RSSI & counters\n");
+    printf("  link                             Negotiated HT/WMM/rates and offload status\n");
+    printf("  options <0..7>                   Set radio options while disconnected (see docs/FEATURES.md)\n");
     printf("  scan                             Trigger 2.4 GHz scan (Ch 1-13) and list discovered APs\n");
     printf("  connect <SSID> [PSK] [BSSID]     Authenticate, associate, and run WPA2 4-way handshake\n");
     printf("  disconnect                       Deauthenticate and tear down active association\n");
@@ -304,6 +335,10 @@ int main(int argc, char **argv) {
     int rc = 0;
     if (strcmp(argv[1], "status") == 0) {
         rc = cmdStatus(conn);
+    } else if (strcmp(argv[1], "link") == 0) {
+        rc = cmdLink(conn);
+    } else if (strcmp(argv[1], "options") == 0) {
+        rc = cmdOptions(conn, argc == 3 ? argv[2] : nullptr);
     } else if (strcmp(argv[1], "scan") == 0) {
         rc = cmdScan(conn);
     } else if (strcmp(argv[1], "connect") == 0) {

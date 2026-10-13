@@ -1,14 +1,15 @@
 Installed.
 
-1. Open "RTL8723BE Wireless Utility" and click "Load Driver…" (asks for your password).
-2. The first time (and after each update) macOS asks you to allow the driver in
-   System Settings → Privacy & Security. Allow it, restart, and click "Load Driver…"
-   again after logging in.
-3. Click Scan, choose your network and enter its password — or in Terminal:
+1. Open RTL8723BE Wireless Utility after login and click Load Driver….
+2. If macOS requires extension approval, follow Privacy & Security and restart;
+   load again after login. Do not enable boot-time injection for this build.
+3. Scan, join a WPA2 Personal network and choose Remember in Keychain. Saved
+   networks can auto-join while the app runs. Right-click a network to forget it.
+4. Settings shows negotiated mode/offload options and the separate Bluetooth
+   loader. Follow Bluetooth Guide.txt for manual loading and external dependencies;
+   pairing and power controls use macOS Bluetooth Settings.
 
-       rtl8723be_cli scan
-       rtl8723be_cli connect "Network Name" 'password'
-
-Load the driver again after each restart. The connection appears as a wired
-network port (en*), not in the Wi-Fi menu. To remove everything, run uninstall.sh
-from the disk image with sudo.
+Wi-Fi remains an Ethernet-style en* interface. Full Wi-Fi 4 compliance, native
+AirPort integration and Bluetooth hardware validation remain pending.
+Load drivers again after a restart. Use uninstall.sh from the disk image to remove
+both drivers and the app. Forget passwords before uninstalling if desired.

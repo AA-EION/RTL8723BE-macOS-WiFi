@@ -68,7 +68,9 @@ const IOExternalMethodDispatch RTL8723BEUserClient::sMethods[kNumberOfMethods] =
         (IOExternalMethodAction)&RTL8723BEUserClient::sIQCalibrate,
         0, 0,
         1, 0
-    }
+    },
+    {(IOExternalMethodAction)&RTL8723BEUserClient::sGetLinkInfo, 0,0,0,sizeof(RTL8723BELinkInfo)},
+    {(IOExternalMethodAction)&RTL8723BEUserClient::sSetOptions, 1,0,0,0}
 };
 
 bool RTL8723BEUserClient::initWithTask(task_t owningTask, void *securityToken, UInt32 type) {
@@ -221,4 +223,16 @@ IOReturn RTL8723BEUserClient::sIQCalibrate(OSObject *target, void *reference, IO
     IOReturn ret = me->fOwner->runIQK(&mask);
     args->scalarOutput[0] = mask;
     return ret;
+}
+
+IOReturn RTL8723BEUserClient::sGetLinkInfo(OSObject *target, void *, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    return me->fOwner->getLinkInfo((RTL8723BELinkInfo *)args->structureOutput);
+}
+IOReturn RTL8723BEUserClient::sSetOptions(OSObject *target, void *, IOExternalMethodArguments *args) {
+    RTL8723BEUserClient *me = OSDynamicCast(RTL8723BEUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    if (args->scalarInput[0] > UINT32_MAX) return kIOReturnBadArgument;
+    return me->fOwner->setOptions(uint32_t(args->scalarInput[0]));
 }

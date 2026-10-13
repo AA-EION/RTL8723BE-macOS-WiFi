@@ -26,7 +26,7 @@ cp "${PROJECT_DIR}/gui/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.i
 echo "[*] Compiling Swift/AppKit GUI binary..."
 swiftc -O -parse-as-library -swift-version 5 -target x86_64-apple-macosx14.0 \
     -import-objc-header "${PROJECT_DIR}/gui/RTL8723BEBridge.h" \
-    -framework AppKit -framework SwiftUI -framework IOKit -framework ServiceManagement \
+    -framework AppKit -framework SwiftUI -framework IOKit -framework ServiceManagement -framework Security -framework IOBluetooth \
     "${PROJECT_DIR}"/gui/Sources/*.swift "${PROJECT_DIR}"/gui/Sources/Views/*.swift \
     -o "${APP_BUNDLE}/Contents/MacOS/RTL8723BEWirelessUtility"
 
@@ -34,8 +34,16 @@ swiftc -O -parse-as-library -swift-version 5 -target x86_64-apple-macosx14.0 \
 cp "${PROJECT_DIR}/gui/Info.plist" "${APP_BUNDLE}/Contents/Info.plist"
 cp -R "${PROJECT_DIR}/build/RTL8723BEWiFi.kext" "${APP_BUNDLE}/Contents/Resources/RTL8723BEWiFi.kext"
 cp "${PROJECT_DIR}/tools/rtl8723be_cli" "${APP_BUNDLE}/Contents/Resources/rtl8723be_cli"
+cp -R "${PROJECT_DIR}/build/RTL8723BluetoothFirmware.kext" "${APP_BUNDLE}/Contents/Resources/RTL8723BluetoothFirmware.kext"
+cp "${PROJECT_DIR}/scripts/load_bluetooth_kext.sh" "${APP_BUNDLE}/Contents/Resources/load_bluetooth_kext.sh"
 cp "${PROJECT_DIR}/scripts/load_test_kext.sh" "${APP_BUNDLE}/Contents/Resources/load_test_kext.sh"
 cp "${PROJECT_DIR}/docs/TESTING.md" "${APP_BUNDLE}/Contents/Resources/Testing Guide.txt"
+cp "${PROJECT_DIR}/docs/BLUETOOTH.md" "${APP_BUNDLE}/Contents/Resources/Bluetooth Guide.txt"
+cp "${PROJECT_DIR}/docs/FEATURES.md" "${APP_BUNDLE}/Contents/Resources/Feature Status.txt"
+cp "${PROJECT_DIR}/docs/VALIDATION.md" "${APP_BUNDLE}/Contents/Resources/Validation Record.txt"
+cp "${PROJECT_DIR}/docs/AUDIO_INCIDENT.md" "${APP_BUNDLE}/Contents/Resources/Audio Incident.txt"
+cp "${PROJECT_DIR}/docs/UPSTREAM.md" "${APP_BUNDLE}/Contents/Resources/Upstream Sources.txt"
+cp "${PROJECT_DIR}/docs/upstream-sources.json" "${APP_BUNDLE}/Contents/Resources/upstream-sources.json"
 mkdir -p "${APP_BUNDLE}/Contents/Resources/Licenses"
 cp "${PROJECT_DIR}/LICENSE" "${PROJECT_DIR}/NOTICE.md" "${PROJECT_DIR}/LICENSES/"*.txt "${APP_BUNDLE}/Contents/Resources/Licenses/"
 
@@ -68,7 +76,9 @@ pkgbuild --root "${PKG_ROOT}" --component-plist "${PKG_WORK}/component.plist" \
     "${PKG_WORK}/RTL8723BE-component.pkg"
 cp "${PROJECT_DIR}/installer/resources/"*.txt "${PKG_WORK}/resources/"
 { cat "${PROJECT_DIR}/LICENSE"; printf '\n\n'; cat "${PROJECT_DIR}/NOTICE.md"; printf '\n\n'; \
-  cat "${PROJECT_DIR}/LICENSES/LicenseRef-rtlwifi-firmware.txt"; } > "${PKG_WORK}/resources/License.txt"
+  cat "${PROJECT_DIR}/LICENSES/LicenseRef-rtlwifi-firmware.txt"; printf '\n\n'; \
+  cat "${PROJECT_DIR}/LICENSES/LicenseRef-rtl-bt-firmware.txt"; printf '\n\n'; \
+  cat "${PROJECT_DIR}/LICENSES/LicenseRef-OpenBSD-net80211.txt"; } > "${PKG_WORK}/resources/License.txt"
 sed "s/__VERSION__/${VERSION}/" "${PROJECT_DIR}/installer/Distribution.xml" > "${PKG_WORK}/Distribution.xml"
 PKG_OUT="${PKG_WORK}/RTL8723BE WiFi ${VERSION}.pkg"
 productbuild --distribution "${PKG_WORK}/Distribution.xml" --resources "${PKG_WORK}/resources" \
@@ -82,6 +92,12 @@ mkdir -p "${DMG_ROOT}"
 cp "${PKG_OUT}" "${DMG_ROOT}/Install RTL8723BE WiFi.pkg"
 cp "${PROJECT_DIR}/scripts/uninstall.sh" "${DMG_ROOT}/uninstall.sh"
 cp "${PROJECT_DIR}/installer/resources/welcome.txt" "${DMG_ROOT}/Read Me.txt"
+cp "${PROJECT_DIR}/docs/BLUETOOTH.md" "${DMG_ROOT}/Bluetooth Guide.txt"
+cp "${PROJECT_DIR}/docs/FEATURES.md" "${DMG_ROOT}/Feature Status.txt"
+cp "${PROJECT_DIR}/docs/VALIDATION.md" "${DMG_ROOT}/Validation Record.txt"
+cp "${PROJECT_DIR}/docs/AUDIO_INCIDENT.md" "${DMG_ROOT}/Audio Incident.txt"
+cp "${PROJECT_DIR}/docs/UPSTREAM.md" "${DMG_ROOT}/Upstream Sources.txt"
+cp "${PROJECT_DIR}/docs/upstream-sources.json" "${DMG_ROOT}/upstream-sources.json"
 mkdir -p "${DMG_ROOT}/Licenses"
 cp "${PROJECT_DIR}/LICENSE" "${PROJECT_DIR}/NOTICE.md" "${PROJECT_DIR}/LICENSES/"*.txt "${DMG_ROOT}/Licenses/"
 

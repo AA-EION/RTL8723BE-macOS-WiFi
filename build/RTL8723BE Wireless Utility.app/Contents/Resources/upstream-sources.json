@@ -1,0 +1,198 @@
+[
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/trx.h",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/trx.h",
+    "sha256": "25bdaf5f3112661242e94821805250668ec4b3f2d1525d2931c30bbd6efcb74d"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/trx.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/trx.c",
+    "sha256": "c8907aab4935746a54696e48a6429feff390a4a61029c0d6c22fedfbac07bd3c"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/hw.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/hw.c",
+    "sha256": "a9a14a0ab76506495b80e0ae4c94bf24ac2d8c8cb08f85a2d62b06a13553348d"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/sw.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/sw.c",
+    "sha256": "62ebeed10f64cd5e254d331303d7ebac1db02ed298ade81a6ae817d8453005e0"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/fw.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/fw.c",
+    "sha256": "f804742d7e94d91a328533bb44b11861bcbfcf4bf7b0335781e76a30039f9040"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/fw.h",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/fw.h",
+    "sha256": "17f3166264b22f73a69d88cbfbb025d86c0c7006d1735368c755280247ca9d36"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/reg.h",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/reg.h",
+    "sha256": "630b9f2388a0e22b9cacc58b460698a62007e635d147d95447d08fc78499f6bb"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723be/dm.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723be/dm.c",
+    "sha256": "a359331ab034962bad980d20afee56fc16d08a21473b6b552e6f7817dd702a8b"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/cam.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/cam.c",
+    "sha256": "bf06e64763d6ab66f25ba05d0be4fdfbe5dbcd3c43fd6181f02f6fdf41b4c63a"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/base.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/base.c",
+    "sha256": "13c56f9ef3af35308be1bb343de028c62ec1f61c304d2f8bec827366d7a74364"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/core.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/core.c",
+    "sha256": "45f1cc9ef688cf633612cfdfe09eacd7926095836d3efe8cc0e88f7d57eca061"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/pci.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/pci.c",
+    "sha256": "6f2d40e6484090d0cc4ee64a2f3540361d7ea00109468cd7f36e345e7f8cca23"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/wifi.h",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/wifi.h",
+    "sha256": "a1e4a5d2f2d71c1cba431ae97139c18ae84bdda6a81eab50b22fc3b3b0954b95"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/rtl8723com/fw_common.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/rtl8723com/fw_common.c",
+    "sha256": "2e61b57bd8adc995d399eeb3a6c1b24db4474b7e7640b38ad4443048b61e4049"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/btcoexist/halbtc8723b1ant.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/btcoexist/halbtc8723b1ant.c",
+    "sha256": "f5fcf4437a924cdd62ae13148ef143f4430d3fd85988b45e01803f7d54ca31fb"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/net/wireless/realtek/rtlwifi/btcoexist/halbtc8723b2ant.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/realtek/rtlwifi/btcoexist/halbtc8723b2ant.c",
+    "sha256": "3536ad85f1150bdbe31aaccb08df52c0f52d115c5152a1712cdb76343d0caeab"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/bluetooth/btrtl.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/bluetooth/btrtl.c",
+    "sha256": "c21981be94634571299aeeab32522b79e0eddf225b6133afd09ea4ade7c1533f"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "drivers/bluetooth/btusb.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/bluetooth/btusb.c",
+    "sha256": "7f65916b87f255a2ce8fb62d2fec46404749caec4976989b28c45d2106698ef9"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "net/mac80211/wpa.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/net/mac80211/wpa.c",
+    "sha256": "81ad4533224cc2f4aeed59cbdc4f7e515ec1f0cb25a6ce7d36f2083a41629886"
+  },
+  {
+    "project": "Linux",
+    "revision": "v6.12",
+    "path": "net/mac80211/rx.c",
+    "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/net/mac80211/rx.c",
+    "sha256": "9a9f20c3380a7bdf93161a04dcbed7c65d59de2a13cd94c6724bd5f36a283c14"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "ieee80211.h,v 1.67 2026/05/28 10:50:47 kirill Exp",
+    "path": "sys/net80211/ieee80211.h",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/net80211/ieee80211.h",
+    "sha256": "4b10494ab0322392180ced8d8935656a1cc6749ac1b2f033d4892de0e710cea4"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "ieee80211_input.c,v 1.263 2026/05/28 10:50:47 kirill Exp",
+    "path": "sys/net80211/ieee80211_input.c",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/net80211/ieee80211_input.c",
+    "sha256": "070a23e3a7bf9f73af165da3ecffa9b64b9bb2e12f94bd543376490e5062e63b"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "ieee80211_output.c,v 1.148 2026/05/28 10:50:47 kirill Exp",
+    "path": "sys/net80211/ieee80211_output.c",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/net80211/ieee80211_output.c",
+    "sha256": "7ffb88fb0a940703532898f570e494dd5e0b92ec2559286d7d7caecb6df82e02"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "ieee80211_pae_input.c,v 1.39 2026/05/24 16:24:54 kirill Exp",
+    "path": "sys/net80211/ieee80211_pae_input.c",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/net80211/ieee80211_pae_input.c",
+    "sha256": "c5f57f3946d8fbf5c6466e77e97322e50d839a3504db7414f6dc9a0c455585ee"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "ieee80211_pae_output.c,v 1.33 2022/01/05 05:18:25 dlg Exp",
+    "path": "sys/net80211/ieee80211_pae_output.c",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/net80211/ieee80211_pae_output.c",
+    "sha256": "059140a66b31da42d170048d4503221577698410bdc35aba4a8c25fbd0b084db"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "ieee80211_crypto.c,v 1.81 2025/12/03 10:21:12 stsp Exp",
+    "path": "sys/net80211/ieee80211_crypto.c",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/net80211/ieee80211_crypto.c",
+    "sha256": "0f9c541ab0fbcdbeb5000ca8b64432191fc876770a39d389e8d4a07b00cf3627"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "ieee80211_node.c,v 1.217 2026/09/19 19:36:42 stsp Exp",
+    "path": "sys/net80211/ieee80211_node.c",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/net80211/ieee80211_node.c",
+    "sha256": "6842049c5483eba99bf64d6f3898ec60e8c762e9906acbee556ddb5ffcb79af2"
+  },
+  {
+    "project": "OpenBSD",
+    "revision": "rtwn.c,v 1.61 2025/08/20 14:24:05 kevlo Exp",
+    "path": "sys/dev/ic/rtwn.c",
+    "url": "https://raw.githubusercontent.com/openbsd/src/master/sys/dev/ic/rtwn.c",
+    "sha256": "ad9ad229a8217d51167802640e11c5bc56fb40ded9229006141239bd5fe9b5ae"
+  }
+]
