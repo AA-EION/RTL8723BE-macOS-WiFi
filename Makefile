@@ -29,6 +29,7 @@ CLI_BIN       := tools/rtl8723be_cli
 KEXT_OBJS     := build/RTL8723BE.o \
                  build/RTL8723BEUserClient.o \
                  build/RTL8723BE_crypto.o \
+                 build/RTL8723BE_protocol.o \
                  build/RTL8723BE_firmware.o \
                  build/RTL8723BE_firmware36.o \
                  build/RTL8723BE_tables.o \
@@ -39,7 +40,30 @@ KEXT_OBJS     := build/RTL8723BE.o \
 .DEFAULT_GOAL := all
 .PHONY: all kext cli test test-hardware diagnose clean
 
-all: kext cli
+all: kext cli bluetooth
+
+BT_BUNDLE := build/RTL8723BluetoothFirmware.kext
+BT_OBJECTS := build/RTL8723BluetoothFirmware.o build/bt_firmware.o build/bt_kmod.o
+
+build/RTL8723BluetoothFirmware.o: bluetooth/RTL8723BluetoothFirmware.cpp bluetooth/RTL8723BluetoothFirmware.hpp bluetooth/firmware.hpp
+	@mkdir -p build
+	$(CXX) $(KEXT_CXXFLAGS) -Ibluetooth -c $< -o $@
+
+build/bt_firmware.cpp: bluetooth/firmware/rtl8723b_fw.bin scripts/embed_bt_firmware.py
+	python3 scripts/embed_bt_firmware.py $< $@
+
+build/bt_firmware.o: build/bt_firmware.cpp bluetooth/firmware.hpp
+	$(CXX) $(KEXT_CXXFLAGS) -Ibluetooth -c $< -o $@
+
+build/bt_kmod.o: bluetooth/kmod.c
+	$(CC) $(KEXT_CFLAGS) -c $< -o $@
+
+.PHONY: bluetooth
+bluetooth: $(BT_OBJECTS) bluetooth/Info.plist
+	@mkdir -p $(BT_BUNDLE)/Contents/MacOS
+	$(CXX) $(KEXT_LDFLAGS) $(BT_OBJECTS) -o $(BT_BUNDLE)/Contents/MacOS/RTL8723BluetoothFirmware
+	cp bluetooth/Info.plist $(BT_BUNDLE)/Contents/Info.plist
+	codesign --force --deep --sign - $(BT_BUNDLE)
 
 build/%.o: src/%.cpp
 	@mkdir -p build
@@ -59,14 +83,14 @@ cli: tools/rtl8723be_cli.cpp src/RTL8723BE_ipc.h
 	$(CXX) -arch x86_64 -std=c++17 -O2 -framework IOKit -framework CoreFoundation \
 		tools/rtl8723be_cli.cpp -o $(CLI_BIN)
 
-test: test-hardware test-crypto test-boot-config
+test: test-hardware test-crypto test-protocol test-bluetooth test-credentials test-boot-config
 	$(MAKE) -C tests test
 
 diagnose: kext
 	kmutil print-diagnostics --bundle-path $(KEXT_BUNDLE)
 
 clean:
-	rm -rf build/*.o $(KEXT_BUNDLE) $(CLI_BIN)
+	rm -rf build/*.o build/*.d $(KEXT_BUNDLE) $(BT_BUNDLE) $(CLI_BIN) build/bt_firmware.cpp
 
 # Production descriptor ABI checks, independent of the legacy simulated driver.
 test-hardware:
@@ -83,3 +107,20 @@ test-crypto:
 .PHONY: test-boot-config
 test-boot-config:
 	python3 tests/test_boot_config.py
+
+.PHONY: test-protocol test-bluetooth
+test-protocol:
+	@mkdir -p build
+	$(CXX) -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc tests/test_protocol.cpp src/RTL8723BE_protocol.cpp src/RTL8723BE_crypto.cpp -o build/test_protocol
+	./build/test_protocol
+
+test-bluetooth:
+	@mkdir -p build
+	$(CXX) -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined -Ibluetooth tests/test_bluetooth_firmware.cpp -o build/test_bluetooth_firmware
+	./build/test_bluetooth_firmware
+
+.PHONY: test-credentials
+test-credentials:
+	@mkdir -p build
+	swiftc -parse-as-library -module-cache-path build/swift-module-cache -framework Security gui/Sources/NetworkCredentials.swift tests/test_credentials.swift -o build/test_credentials
+	./build/test_credentials

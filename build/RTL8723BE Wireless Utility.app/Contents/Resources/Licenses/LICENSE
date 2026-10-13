@@ -31,3 +31,14 @@ carries an SPDX-License-Identifier line naming its licence.
 
 The app talks to the kernel extension only through the IOKit user-client
 interface; the two are separate programs. Third-party notices: NOTICE.md.
+
+4. OpenBSD net80211 (BSD-3-Clause and ISC)
+   src/RTL8723BE_protocol.cpp contains BSD/ISC adaptations alongside original
+   MIT code. The driver includes BSD ADDBA/decapsulation adaptations. The full
+   original copyright notices and licence terms are in their source files and
+   LICENSES/LicenseRef-OpenBSD-net80211.txt; see NOTICE.md for attribution.
+
+5. Bluetooth loader (GPL-2.0-or-later)
+   bluetooth/ source and RTL8723BluetoothFirmware.kext use the Linux btrtl.c
+   protocol under GPL-2.0-or-later. The supplied GPL-2.0 text is in LICENSES.
+   The unmodified rtl8723b_fw.bin uses LICENSES/LicenseRef-rtl-bt-firmware.txt.

@@ -19,15 +19,17 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3.0</string>
+	<string>1.4.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.3.0</string>
+	<string>1.4.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026 Issen Software Group</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Show Bluetooth controller status and use macOS Bluetooth controls for the RTL8723B radio.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Issen Software Group</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

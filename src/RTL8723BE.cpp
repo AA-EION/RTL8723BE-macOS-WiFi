@@ -3,6 +3,34 @@
 // Ported from Linux drivers/net/wireless/realtek/rtlwifi (rtl8723be, rtl8723com, efuse.c),
 // Copyright (c) 2009-2014 Realtek Corporation (licensed GPL-2.0).
 
+/*-
+ * Copyright (c) 2001 Atsushi Onoe
+ * Copyright (c) 2002, 2003 Sam Leffler, Errno Consulting
+ * Copyright (c) 2007-2009 Damien Bergamini
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. The name of the author may not be used to endorse or promote products
+ *    derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 #include "RTL8723BE.hpp"
 #include <string.h>
 #include <sys/random.h>
@@ -39,7 +67,9 @@ enum {
     kOpReadRF,
     kOpWriteRF,
     kOpDiag,
-    kOpIQK
+    kOpIQK,
+    kOpLinkInfo,
+    kOpOptions
 };
 
 static inline uint32_t bitShift(uint32_t mask) {
@@ -174,6 +204,9 @@ bool RTL8723BE::init(OSDictionary *properties) {
     fCommandGate = nullptr;
     fInterruptSource = nullptr;
     fScanTimer = nullptr;
+    fLinkTimer = nullptr;
+    fLinkTicks = fLastBSSActivity = fHandshakeDeadline = 0;
+    fLinkRSSI = -100;
     fNetif = nullptr;
     fMediumDict = nullptr;
     fRFLock = nullptr;
@@ -183,6 +216,7 @@ bool RTL8723BE::init(OSDictionary *properties) {
     fHIMRMask = 0;
     fInterruptEnabled = false;
     fHwReady = false;
+    fPMRegistered = fSuspended = fInterfaceEnabled = false;
     fFwReady = false;
     memset(&fCalib, 0, sizeof(fCalib));
     fInitStage = kStageNone;
@@ -211,6 +245,11 @@ bool RTL8723BE::init(OSDictionary *properties) {
         memset(&fRxBuf[j], 0, sizeof(fRxBuf[j]));
     }
 
+    fOptions = kRTLOptionHT;
+    int bluetooth = 0;
+    if (PE_parse_boot_argn("rtl8723be_bluetooth", &bluetooth, sizeof(bluetooth)) && bluetooth == 1)
+        fOptions |= kRTLOptionBluetoothCoexist;
+    fTxCrypto = false;
     fState = kRTLStateDisconnected;
     memset(fMyMAC, 0, 6);
     memset(fConnectedBSSID, 0, 6);
@@ -221,17 +260,19 @@ bool RTL8723BE::init(OSDictionary *properties) {
 
     memset(fPMK, 0, sizeof(fPMK));
     memset(fPTK, 0, sizeof(fPTK));
-    memset(fGTK, 0, sizeof(fGTK));
-    memset(fSNonce, 0, sizeof(fSNonce));
-    memset(fANonce, 0, sizeof(fANonce));
+    fWPA.reset();
+    memset(&fPeer, 0, sizeof(fPeer));
+    fDataRate = DESC_RATE1M;
+    fRateID = 8;
+    fFirmwareRA = false;
 
     fKeyInstalled = false;
-    fLastReplayCounter = 0;
     fTxPN = 1;
     for (int i = 0; i < 16; ++i) fRxPtkPN[i] = 0;
-    for (int i = 0; i < 4; ++i)  fRxGtkPN[i] = 0;
+    memset(fRxGtkPN, 0, sizeof(fRxGtkPN));
 
     memset(&fScanResults, 0, sizeof(fScanResults));
+    memset(fScanPeers, 0, sizeof(fScanPeers));
     fScanActive = false;
     fScanRetriedOtherAntenna = false;
     fAntennaCalibrated = false;
@@ -260,6 +301,12 @@ bool RTL8723BE::init(OSDictionary *properties) {
 }
 
 void RTL8723BE::cleanupResources() {
+    if (fPMRegistered) { fPMRegistered = false; PMstop(); }
+    rtl_wifi::erase(fPMK, sizeof(fPMK));
+    rtl_wifi::erase(fPTK, sizeof(fPTK));
+    fWPA.reset();
+    rtl_wifi::erase(fTxPlain, sizeof(fTxPlain));
+    rtl_wifi::erase(fRxPlain, sizeof(fRxPlain));
     fScanActive = false;
     if (fCommandGate) {
         fCommandGate->commandWakeup(&fScanActive);
@@ -270,6 +317,12 @@ void RTL8723BE::cleanupResources() {
         if (fWorkLoop) fWorkLoop->removeEventSource(fScanTimer);
         fScanTimer->release();
         fScanTimer = nullptr;
+    }
+    if (fLinkTimer) {
+        fLinkTimer->cancelTimeout();
+        if (fWorkLoop) fWorkLoop->removeEventSource(fLinkTimer);
+        fLinkTimer->release();
+        fLinkTimer = nullptr;
     }
 
     disableInterrupts();
@@ -496,6 +549,12 @@ bool RTL8723BE::start(IOService *provider) {
         super::stop(provider);
         return false;
     }
+    fLinkTimer = IOTimerEventSource::timerEventSource(this, &RTL8723BE::linkTimerAction);
+    if (!fLinkTimer || fWorkLoop->addEventSource(fLinkTimer) != kIOReturnSuccess) {
+        cleanupResources();
+        super::stop(provider);
+        return false;
+    }
 
     fMediumDict = OSDictionary::withCapacity(1);
     if (!fMediumDict) {
@@ -522,17 +581,28 @@ bool RTL8723BE::start(IOService *provider) {
     fInterruptSource->enable();
     enableInterrupts();
     refreshLED(true);
+    fLinkTimer->setTimeoutMS(1000);
 
     setLinkStatus(kIONetworkLinkValid, nullptr);
     fNetif->registerService();
+    static IOPMPowerState powerStates[2] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,IOPMDeviceUsable | IOPMPowerOn,IOPMPowerOn,IOPMPowerOn,0,0,0,0,0,0,0,0}
+    };
+    PMinit();
+    fPMRegistered = true;
+    registerPowerDriver(this, powerStates, 2);
+    provider->joinPMtree(this);
+    makeUsable();
     registerService();
-    IOLog("RTL8723BE: Driver v1.3.0 ready (fw v%u.%u, %u-ant, path %s%s, RCR=0x%08x, RF18=0x%05x)\n",
+    IOLog("RTL8723BE: Driver v1.4.0 ready (fw v%u.%u, %u-ant, path %s%s, RCR=0x%08x, RF18=0x%05x)\n",
           fFwVersion, fFwSubVersion, fAntNum, fActiveAntenna == 2 ? "AUX/S0" : "MAIN/S1",
           fAntennaForced ? " forced" : "", mmio_read32(REG_RCR), fRFChnlVal);
     return true;
 }
 
 void RTL8723BE::stop(IOService *provider) {
+    if (fPMRegistered) { fPMRegistered = false; PMstop(); }
     // Serialize with any in-flight user-client call before tearing down event sources.
     if (fCommandGate) {
         fCommandGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this, &RTL8723BE::quiesce));
@@ -545,6 +615,7 @@ IOReturn RTL8723BE::quiesce(void *, void *, void *, void *) {
     fHwReady = false;
     disableInterrupts();
     if (fScanTimer) fScanTimer->cancelTimeout();
+    if (fLinkTimer) fLinkTimer->cancelTimeout();
     fScanActive = false;
     fCommandGate->commandWakeup(&fScanActive);
     return kIOReturnSuccess;
@@ -553,6 +624,63 @@ IOReturn RTL8723BE::quiesce(void *, void *, void *, void *) {
 void RTL8723BE::free() {
     cleanupResources();
     super::free();
+}
+
+IOReturn RTL8723BE::setPowerState(unsigned long state, IOService *device) {
+    (void)device;
+    if (fPMRegistered && fCommandGate) fCommandGate->runAction(&RTL8723BE::gatedPower, (void *)(uintptr_t)state);
+    return IOPMAckImplied;
+}
+
+IOReturn RTL8723BE::gatedPower(OSObject *owner, void *state, void *, void *, void *) {
+    RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
+    if (!me || !me->fPMRegistered || !me->fPCIDevice || !me->fMMIOBase) return kIOReturnNotReady;
+    bool awake = (uintptr_t)state != 0;
+    if (!awake && !me->fSuspended) {
+        if (IOOutputQueue *q = me->getOutputQueue()) { q->stop(); q->flush(); }
+        me->fScanTimer->cancelTimeout();
+        me->fLinkTimer->cancelTimeout();
+        me->fScanActive = false;
+        me->fCommandGate->commandWakeup(&me->fScanActive);
+        if (me->fHwReady) me->deauthTeardown();
+        // Linux rtl_op_stop()/rtl_pci_stop() shuts the MAC down before PCI suspend.
+        me->hwDisable();
+        me->fInterruptSource->disable();
+        me->fPCIDevice->setBusMasterEnable(false);
+        (void)me->fPCIDevice->configRead16(kIOPCIConfigCommand);
+        me->fSuspended = true;
+        IOLog("RTL8723BE: radio suspended; keys discarded\n");
+    } else if (awake && me->fSuspended) {
+        me->fPCIDevice->setMemoryEnable(true);
+        UInt8 capability = 0;
+        if (me->fPCIDevice->findPCICapability(kIOPCIPowerManagementCapability, &capability)) {
+            uint16_t control = me->fPCIDevice->configRead16(capability + 4);
+            me->fPCIDevice->configWrite16(capability + 4, control & ~0x8003U);
+            IOSleep(15);
+        }
+        if (me->fPCIDevice->findPCICapability(kIOPCIPCIExpressCapability, &capability)) {
+            uint16_t control = me->fPCIDevice->configRead16(capability + 0x10);
+            me->fPCIDevice->configWrite16(capability + 0x10, control & ~3U);
+        }
+        if (me->mmio_read32(REG_SYS_ISO_CTRL) == 0xffffffffU) return kIOReturnNotReady;
+        me->resetRings();
+        me->fPCIDevice->setBusMasterEnable(true);
+        // Linux's resume path restarts the adapter; never reuse pre-sleep DMA/keys.
+        if (!me->hwInit()) {
+            me->hwDisable();
+            me->fPCIDevice->setBusMasterEnable(false);
+            IOLog("RTL8723BE: wake initialization failed; radio remains unavailable\n");
+            return kIOReturnNotReady;
+        }
+        me->fSuspended = false;
+        me->fLastBSSActivity = me->fLinkTicks;
+        me->fInterruptSource->enable();
+        me->enableInterrupts();
+        me->fLinkTimer->setTimeoutMS(1000);
+        if (me->fInterfaceEnabled) if (IOOutputQueue *q = me->getOutputQueue()) q->start();
+        IOLog("RTL8723BE: radio reinitialized after wake; ready for application auto-join\n");
+    }
+    return kIOReturnSuccess;
 }
 
 // ============================================================================
@@ -574,6 +702,7 @@ bool RTL8723BE::configureInterface(IONetworkInterface *netif) {
 IOReturn RTL8723BE::enable(IONetworkInterface *netif) {
     (void)netif;
     if (!fHwReady) return kIOReturnNotReady;
+    fInterfaceEnabled = true;
     if (IOOutputQueue *q = getOutputQueue()) {
         q->setCapacity(256);
         q->start();
@@ -586,6 +715,7 @@ IOReturn RTL8723BE::enable(IONetworkInterface *netif) {
 
 IOReturn RTL8723BE::disable(IONetworkInterface *netif) {
     (void)netif;
+    fInterfaceEnabled = false;
     if (IOOutputQueue *q = getOutputQueue()) {
         q->stop();
         q->flush();
@@ -1243,9 +1373,9 @@ void RTL8723BE::btcoexInit() {
     applyCoexProfile();
 }
 
-// Linux _rtl8723be_fill_h2c_command() for commands of up to 3 parameter bytes.
+// Linux _rtl8723be_fill_h2c_command(): three main and four extension bytes.
 bool RTL8723BE::sendH2C(uint8_t id, const uint8_t *params, uint8_t len) {
-    if (!fFwReady || len > 3) return false;
+    if (!fFwReady || len > 7 || (len && !params)) return false;
     uint8_t box = fLastHmeBox;
     bool free = false;
     for (int i = 0; i < 100; ++i) {
@@ -1257,7 +1387,13 @@ bool RTL8723BE::sendH2C(uint8_t id, const uint8_t *params, uint8_t len) {
         return false;
     }
     uint8_t content[4] = {id, 0, 0, 0};
-    for (uint8_t i = 0; i < len; ++i) content[1 + i] = params[i];
+    // Linux fw.c: extension must be committed before the main mailbox triggers the MCU.
+    if (len > 3) {
+        uint8_t extension[4] = {};
+        memcpy(extension, params + 3, len - 3);
+        for (unsigned i = 0; i < 4; ++i) mmio_write8(0x01F0 + box * 4U + i, extension[i]);
+    }
+    for (uint8_t i = 0; i < len && i < 3; ++i) content[1 + i] = params[i];
     for (uint8_t i = 0; i < 4; ++i) mmio_write8(REG_HMEBOX_0 + box * 4U + i, content[i]);
     fLastHmeBox = (uint8_t)((box + 1) & 0x3);
     return true;
@@ -1278,6 +1414,14 @@ void RTL8723BE::applyCoexProfile() {
             const uint8_t gntBtLow = 0;
             sendH2C(0x6E, &gntBtLow, 1);
         }
+    }
+    if (fAntNum == 1) {
+        const bool shared = (fOptions & kRTLOptionBluetoothCoexist) != 0;
+        // Linux halbtc8723b1ant_ps_tdma(false, 8) and internal BTC_ANT_PATH_PTA.
+        // This is its PTA baseline, not the dynamic SCO/HID/A2DP policy engine.
+        const uint8_t tdma[5] = {uint8_t(shared ? 8 : 0),0,0,0,0};
+        sendH2C(0x60, tdma, sizeof(tdma));
+        mmio_write32(0x0948, shared ? (fActiveAntenna == 2 ? 0x80 : 0x200) : (fActiveAntenna == 2 ? 0x280 : 0));
     }
     IOLog("RTL8723BE: BT-coex profile: %u-antenna\n", fAntNum);
 }
@@ -1751,7 +1895,7 @@ bool RTL8723BE::hwInit() {
 
     hwConfigure();
     mmio_write32(REG_CAMCMD, 0xC0000000U);   // invalidate + clear all CAM entries
-    mmio_write16(REG_SECCFG, 0x0000);        // software crypto only
+    mmio_write8(REG_SECCFG, 0x0000);        // software crypto only
     for (int i = 0; i < 6; ++i) mmio_write8(REG_MACID + i, fMyMAC[i]);
 
     btcoexInit();
@@ -1875,7 +2019,14 @@ bool RTL8723BE::transmitRawFrame(RTLQueueId qId, const uint8_t *frame, size_t le
     desc->set_bmc(multicast);
     desc->set_queuesel(rtlTxQueueSelect(qId));
     desc->set_macid(0);
-    desc->set_use_rate(true);
+    const bool peerData = isData && qId != Q_MGNT && fState == kRTLStateConnected;
+    desc->set_use_rate(!peerData || !fFirmwareRA);
+    desc->set_shortgi(peerData && fPeer.ht && fPeer.shortGI);
+    if (peerData && fTxCrypto && (fc & 0x4000)) desc->set_security(3);
+    if (peerData && fPeer.protection) {
+        desc->set_cts_to_self(true);
+        desc->set_rts_rate(DESC_RATE11M);
+    }
     desc->set_tx_rate(rate);
     desc->set_data_rate_fb_limit(0x1F);
     desc->set_rts_rate_fb_limit(0xF);
@@ -1883,7 +2034,7 @@ bool RTL8723BE::transmitRawFrame(RTLQueueId qId, const uint8_t *frame, size_t le
         desc->set_rate_id(7);           // RATR_INX_WIRELESS_MC
         desc->set_disable_fb(true);
     } else {
-        desc->set_rate_id(4);           // RATR_INX_WIRELESS_GB
+        desc->set_rate_id(peerData ? fRateID : 7); // Linux ARFR ID, not RATR index
     }
     if (!isQoS) {
         desc->set_hwseq_en(true);       // hardware assigns the sequence number
@@ -2008,7 +2159,10 @@ void RTL8723BE::handleRxInterrupt() {
         const uint8_t rate = desc->get_rxmcs();
         const int mod = rate < DESC_RATE6M ? 0 : (rate <= DESC_RATE54M ? 1 : 2);
         fCurRxRate = rate;
-        if (desc->get_crc32_err()) {
+        if (desc->get_c2h_report()) {
+            // Linux rtl8723be_rx_query_desc(): C2H has no 802.11 FCS to strip.
+            // Dynamic coexistence/rate report consumers are not yet ported.
+        } else if (desc->get_crc32_err()) {
             fRxCrc[mod]++;
             fRxErrors++;
         } else if (desc->get_icv_err()) {
@@ -2035,7 +2189,8 @@ void RTL8723BE::handleRxInterrupt() {
 }
 
 void RTL8723BE::handleTxInterrupt() {
-    // Descriptors are recycled lazily in transmitRawFrame() via the OWN bit.
+    // Resume queued mbufs after hardware releases a descriptor (no packet drop on ring pressure).
+    if (fState == kRTLStateConnected) if (IOOutputQueue *q = getOutputQueue()) q->service();
 }
 
 // ============================================================================
@@ -2107,6 +2262,7 @@ void RTL8723BE::scanStep() {
 
 void RTL8723BE::finishScan() {
     setChannel(fHomeChannel);
+    applyCoexProfile(); // restore PTA after scan's temporary Wi-Fi antenna selection
     if (fState == kRTLStateConnected) {
         sendNullDataFrame(false);
     }
@@ -2122,10 +2278,32 @@ void RTL8723BE::scanTimerAction(OSObject *owner, IOTimerEventSource *timer) {
     if (me && me->fHwReady) me->scanStep();
 }
 
+void RTL8723BE::linkTimerAction(OSObject *owner, IOTimerEventSource *timer) {
+    RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
+    if (!me || !me->fHwReady) return;
+    ++me->fLinkTicks;
+    if (!me->fScanActive) {
+        // Host policy: bounded authentication/association and handshake waits, like BSD's
+        // management watchdog. These are deadlines, not retransmission-triggered extensions.
+        bool pending = me->fState >= kRTLStateAuthenticating && me->fState <= kRTLStateHandshake;
+        bool lost = me->fState == kRTLStateConnected && me->fLinkTicks - me->fLastBSSActivity >= 30;
+        if ((pending && int32_t(me->fLinkTicks - me->fHandshakeDeadline) >= 0) || lost) {
+            IOLog("RTL8723BE: %s; disconnecting for application auto-join\n", lost ? "BSS inactivity timeout" : "connection exchange timeout");
+            me->deauthTeardown();
+        }
+    } else me->fLastBSSActivity = me->fLinkTicks;
+    if (!me->fScanActive && me->fState == kRTLStateConnected && me->fFirmwareRA && me->fLinkRSSI > -100) {
+        // Linux rtl8723be_dm_check_rssi_monitor(), H2C_RSSIBE_REPORT.
+        const uint8_t report[3] = {0,0x20,uint8_t(me->fLinkRSSI + 100)};
+        me->sendH2C(0x42, report, sizeof(report));
+    }
+    timer->setTimeoutMS(1000);
+}
+
 IOReturn RTL8723BE::gatedScan(OSObject *owner, void *, void *, void *, void *) {
     RTL8723BE *me = OSDynamicCast(RTL8723BE, owner);
     if (!me || !me->fHwReady) return kIOReturnNotReady;
-    if (me->fScanActive) return kIOReturnBusy;
+    if (me->fScanActive || (me->fState != kRTLStateDisconnected && me->fState != kRTLStateConnected)) return kIOReturnBusy;
 
     me->fScanActive = true;
     me->fScanRetriedOtherAntenna = false;
@@ -2167,10 +2345,37 @@ IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, voi
     uintptr_t code = (uintptr_t)op;
 
     switch (code) {
+    case kOpLinkInfo: {
+        RTL8723BELinkInfo *info = (RTL8723BELinkInfo *)a1;
+        memset(info, 0, sizeof(*info));
+        info->version = 1; info->options = me->fOptions;
+        info->rate_mask = me->fPeer.rates | (me->fPeer.ht ? uint32_t(me->fPeer.mcs) << 12 : 0);
+        info->ht20 = me->fPeer.ht; info->short_gi = me->fPeer.ht && me->fPeer.shortGI;
+        info->wmm = me->fPeer.wmm; info->firmware_rate_control = me->fFirmwareRA;
+        info->tx_crypto = me->fTxCrypto; info->max_rate = me->fDataRate;
+        return kIOReturnSuccess;
+    }
+    case kOpOptions: {
+        uint32_t options = uint32_t((uintptr_t)a1);
+        if (!me->fHwReady) return kIOReturnNotReady;
+        if (options & ~(kRTLOptionHT | kRTLOptionTxCrypto | kRTLOptionBluetoothCoexist)) return kIOReturnBadArgument;
+        if (me->fState != kRTLStateDisconnected || me->fScanActive) return kIOReturnBusy;
+        me->fOptions = options;
+        me->applyCoexProfile();
+        return kIOReturnSuccess;
+    }
     case kOpConnect: {
         struct Args { const RTL8723BEConnectParams *p; const char *ssid; const char *pass; uint8_t *pmk; };
         Args *a = (Args *)a1;
         if (!me->fHwReady) return kIOReturnNotReady;
+        if (me->fScanActive) return kIOReturnBusy;
+        bool found = false;
+        for (uint32_t i = 0; i < me->fScanResults.count; ++i) {
+            if (memcmp(me->fScanResults.aps[i].bssid, a->p->bssid, 6) == 0 &&
+                strcmp(me->fScanResults.aps[i].ssid, a->ssid) == 0 &&
+                me->fScanResults.aps[i].is_wpa2 && me->fScanPeers[i].rates) found = true;
+        }
+        if (!found) return kIOReturnNotFound;
         if (me->fState != kRTLStateDisconnected) me->deauthTeardown();
         strlcpy(me->fConnectedSSID, a->ssid, sizeof(me->fConnectedSSID));
         memcpy(me->fConnectedBSSID, a->p->bssid, 6);
@@ -2178,6 +2383,7 @@ IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, voi
         return me->beginConnect();
     }
     case kOpDisconnect:
+        if (!me->fHwReady) return kIOReturnNotReady;
         me->deauthTeardown();
         return kIOReturnSuccess;
     case kOpIQK: {
@@ -2204,6 +2410,7 @@ IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, voi
                 st->rssi = me->fScanResults.aps[i].rssi;
             }
         }
+        if (me->fState == kRTLStateConnected) st->rssi = me->fLinkRSSI;
         st->antenna = me->fActiveAntenna;
         st->tx_packets = me->fTxPackets;
         st->rx_packets = me->fRxPackets;
@@ -2224,6 +2431,7 @@ IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, voi
         return kIOReturnSuccess;
     }
     case kOpReadReg: {
+        if (!me->fHwReady) return kIOReturnNotReady;
         uint32_t addr = (uint32_t)(uintptr_t)a1, width = (uint32_t)(uintptr_t)a2;
         uint32_t *out = (uint32_t *)a3;
         if (addr >= 0x4000 || (addr & (width - 1)) != 0) return kIOReturnBadArgument;
@@ -2234,6 +2442,7 @@ IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, voi
         return kIOReturnSuccess;
     }
     case kOpWriteReg: {
+        if (!me->fHwReady) return kIOReturnNotReady;
         uint32_t addr = (uint32_t)(uintptr_t)a1, width = (uint32_t)(uintptr_t)a2;
         uint32_t value = (uint32_t)(uintptr_t)a3;
         if (addr >= 0x4000 || (addr & (width - 1)) != 0) return kIOReturnBadArgument;
@@ -2264,7 +2473,7 @@ IOReturn RTL8723BE::gatedCall(OSObject *owner, void *op, void *a1, void *a2, voi
         d->version = RTL8723BE_DIAG_VERSION;
         d->init_stage = me->fInitStage;
         d->fw_version = ((uint32_t)me->fFwVersion << 16) | me->fFwSubVersion;
-        if (me->fMMIOBase) {
+        if (me->fMMIOBase && me->fHwReady) {
             d->mcufwdl = me->mmio_read32(REG_MCUFWDL);
             d->cr = me->mmio_read16(REG_CR);
             d->rcr = me->mmio_read32(REG_RCR);
@@ -2386,7 +2595,9 @@ bool RTL8723BE::parseBeaconOrProbe(const uint8_t *frame, size_t len, RTL8723BEDi
     memcpy(outAP.bssid, frame + 16, 6);
     outAP.beacon_interval = (uint16_t)(frame[32] | (((uint16_t)frame[33]) << 8));
     outAP.capabilities = (uint16_t)(frame[34] | (((uint16_t)frame[35]) << 8));
-    outAP.is_wpa2 = (outAP.capabilities & 0x0010) != 0 ? 1 : 0; // privacy bit until an RSN IE is seen
+    rtl_wifi::Peer peer;
+    if (!rtl_wifi::parseIEs(frame + 36, len - 36, peer)) return false;
+    outAP.is_wpa2 = peer.wpa2 && (outAP.capabilities & 0x10) ? 1 : 0;
     outAP.channel = fCurrentChannel;
 
     size_t offset = 36;
@@ -2401,8 +2612,6 @@ bool RTL8723BE::parseBeaconOrProbe(const uint8_t *frame, size_t len, RTL8723BEDi
             outAP.ssid[tagLen] = '\0';
         } else if (tag == 3 && tagLen >= 1) {
             outAP.channel = frame[offset];
-        } else if (tag == 48) {
-            outAP.is_wpa2 = 1;
         }
         offset += tagLen;
     }
@@ -2428,6 +2637,12 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
             if (subtype == 8) fRxBeacons++;
             RTL8723BEDiscoveredAP ap;
             if (!parseBeaconOrProbe(frame, len, ap)) return;
+            rtl_wifi::Peer peer;
+            if (!rtl_wifi::parseIEs(frame + 36, len - 36, peer)) return;
+            if (memcmp(frame + 10, fConnectedBSSID, 6) == 0 && memcmp(frame + 16, fConnectedBSSID, 6) == 0) {
+                fLastBSSActivity = fLinkTicks;
+                if (rssi > -100) fLinkRSSI = rssi;
+            }
             ap.rssi = rssi;
             if (ap.channel < 1 || ap.channel > 14) ap.channel = fCurrentChannel;
             for (uint32_t i = 0; i < fScanResults.count; ++i) {
@@ -2436,10 +2651,12 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
                     if (ap.ssid[0] == '\0') memcpy(ap.ssid, fScanResults.aps[i].ssid, sizeof(ap.ssid));
                     if (fScanResults.aps[i].rssi > ap.rssi) ap.rssi = fScanResults.aps[i].rssi;
                     fScanResults.aps[i] = ap;
+                    fScanPeers[i] = peer;
                     return;
                 }
             }
             if (fScanResults.count < RTL8723BE_MAX_SCAN_APS) {
+                fScanPeers[fScanResults.count] = peer;
                 fScanResults.aps[fScanResults.count++] = ap;
             }
             return;
@@ -2447,6 +2664,7 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
 
         // Everything below must come from the AP we are talking to, addressed to us.
         if (memcmp(frame + 10, fConnectedBSSID, 6) != 0) return;
+        if (memcmp(frame + 16, fConnectedBSSID, 6) != 0) return;
         const bool toUs = memcmp(frame + 4, fMyMAC, 6) == 0;
         const bool bcast = (frame[4] & 0x01) != 0;
         if (subtype == 11 && toUs) {
@@ -2455,6 +2673,8 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
             handleAssocResponse(frame, len);
         } else if ((subtype == 12 || subtype == 10) && (toUs || bcast) && fState != kRTLStateDisconnected) {
             handleDeauthFrame(frame, len);
+        } else if (subtype == 13 && toUs) {
+            handleActionFrame(frame, len);
         }
         return;
     }
@@ -2464,6 +2684,8 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
 
     // Only frames From-DS of our BSS addressed to us or group-addressed.
     if ((frame[1] & 0x03) != 0x02 || memcmp(frame + 10, fConnectedBSSID, 6) != 0) return;
+    if (!(frame[4] & 1) && memcmp(frame + 4, fMyMAC, 6) != 0) return;
+    if ((frame[1] & 4) || (frame[22] & 15)) return; // fragmentation requires a separate authenticated reassembly path
     if (subtype & 0x04) return; // null / no-data frames
 
     size_t hdrLen = (subtype & 0x08) ? 26 : 24;
@@ -2473,12 +2695,13 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
 
     if (!isProtected) {
         const uint8_t *llc = frame + hdrLen;
-        if (llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03 && llc[6] == 0x88 && llc[7] == 0x8E) {
+        if (rtl_wifi::snapHeader(llc, len - hdrLen) && llc[6] == 0x88 && llc[7] == 0x8E &&
+            memcmp(frame + 4, fMyMAC, 6) == 0 && !((subtype & 8) && (frame[24] & 0x80))) {
             handleEAPOLFrame(frame, len, hdrLen);
         }
         return; // never deliver unprotected data to the stack
     }
-    if (fState != kRTLStateConnected || !fKeyInstalled) return;
+    if ((fState != kRTLStateConnected && fState != kRTLStateHandshake) || !fKeyInstalled) return;
     if (len < hdrLen + 8 + 8 + 8) return; // MAC + CCMP hdr + LLC + MIC
 
     const uint8_t *ccmp = frame + hdrLen;
@@ -2496,8 +2719,9 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
     }
     const uint8_t keyId = (ccmp[3] >> 6) & 0x03;
 
+    if (ccmp[2] != 0 || (ccmp[3] & 0x3f) != 0x20 || pn == 0) return;
     if (isMulticast) {
-        if (pn <= fRxGtkPN[keyId]) return;
+        if (pn <= fRxGtkPN[keyId][tid]) return;
     } else {
         if (pn <= fRxPtkPN[tid]) { fUcReplay++; return; }
     }
@@ -2513,30 +2737,57 @@ void RTL8723BE::processRxFrame(const uint8_t *frame, size_t len, int8_t rssi) {
     const uint8_t *mic = ciphertext + cipherLen;
     if (cipherLen > sizeof(fRxPlain)) return;
 
-    const uint8_t *key = isMulticast ? fGTK : (fPTK + 32);
+    if ((isMulticast && !fWPA.hasGTK(keyId)) || (!isMulticast && keyId != 0)) return;
+    const uint8_t *key = isMulticast ? fWPA.gtk(keyId) : (fPTK + 32);
     if (!rtl_crypto::ccmp_decrypt(key, nonce, aad, aadLen, ciphertext, cipherLen, mic, fRxPlain)) {
         fRxDropped++;
         if (isMulticast) fBcMicFail++; else fUcMicFail++;
         return;
     }
-    if (isMulticast) fRxGtkPN[keyId] = pn; else fRxPtkPN[tid] = pn;
+    if (isMulticast) fRxGtkPN[keyId][tid] = pn; else fRxPtkPN[tid] = pn;
+    fLastBSSActivity = fLinkTicks;
+    if (rssi > -100) fLinkRSSI = rssi;
+    if ((subtype & 8) && (frame[24] & 0x80)) {
+        if (isMulticast || !rtl_wifi::validateAMSDU(fRxPlain, cipherLen, fMyMAC)) { fRxDropped++; return; }
+        size_t offset = 0;
+        while (offset < cipherLen) {
+            const uint8_t *sub = fRxPlain + offset;
+            size_t amount = (size_t(sub[12]) << 8) | sub[13];
+            deliverMSDU(sub + 14, amount, sub, sub + 6, false);
+            offset += 14 + amount;
+            if (offset < cipherLen) offset = (offset + 3) & ~size_t(3);
+        }
+    } else deliverMSDU(fRxPlain, cipherLen, frame + 4, frame + 16, isMulticast);
+}
 
-    if (cipherLen < 8 || fRxPlain[0] != 0xAA || fRxPlain[1] != 0xAA || fRxPlain[2] != 0x03) return;
-    uint16_t ethertype = (uint16_t)((((uint16_t)fRxPlain[6]) << 8) | fRxPlain[7]);
-    if (ethertype == 0x888E) return; // EAPOL is consumed by the driver
-
-    size_t ethLen = 14 + (cipherLen - 8);
+void RTL8723BE::deliverMSDU(const uint8_t *data, size_t len, const uint8_t *da, const uint8_t *sa, bool multicast) {
+    if (!len || len > 1508 || (sa[0] & 1)) { fRxDropped++; return; }
+    // OpenBSD ieee80211_decap(): remove RFC1042 SNAP, otherwise preserve 802.3 LLC.
+    uint16_t ethertype;
+    if (rtl_wifi::snapHeader(data, len)) {
+        ethertype = uint16_t((data[6] << 8) | data[7]);
+        data += 8; len -= 8;
+        if (ethertype == 0x888e) {
+            if (!multicast && memcmp(sa, fConnectedBSSID, 6) == 0) handleEAPOLKey(data, len);
+            return;
+        }
+    } else {
+        if (len > 1500) { fRxDropped++; return; }
+        ethertype = uint16_t(len);
+    }
+    if (fState != kRTLStateConnected) return;
+    size_t ethLen = 14 + len;
     mbuf_t m = allocatePacket((UInt32)ethLen);
     if (m && fNetif) {
         uint8_t *dst = (uint8_t*)mbuf_data(m);
-        memcpy(dst, frame + 4, 6);       // DA
-        memcpy(dst + 6, frame + 16, 6);  // SA
+        memcpy(dst, da, 6);
+        memcpy(dst + 6, sa, 6);
         dst[12] = (uint8_t)(ethertype >> 8);
         dst[13] = (uint8_t)(ethertype & 0xFF);
-        memcpy(dst + 14, fRxPlain + 8, cipherLen - 8);
+        memcpy(dst + 14, data, len);
         fNetif->inputPacket(m, (UInt32)ethLen);
         if (fNetStats) fNetStats->inputPackets++;
-        if (isMulticast) fBcDelivered++; else fUcDelivered++;
+        if (multicast) fBcDelivered++; else fUcDelivered++;
         fRxBytes += ethLen;
     } else if (m) {
         freePacket(m);
@@ -2566,22 +2817,28 @@ IOReturn RTL8723BE::connect(const RTL8723BEConnectParams *params) {
 
     char ssid[RTL8723BE_MAX_SSID_LEN + 1];
     char pass[RTL8723BE_MAX_PASSPHRASE_LEN + 1];
+    if (!memchr(params->ssid, 0, sizeof(params->ssid)) ||
+        !memchr(params->passphrase, 0, sizeof(params->passphrase))) return kIOReturnBadArgument;
     strlcpy(ssid, params->ssid, sizeof(ssid));
     strlcpy(pass, params->passphrase, sizeof(pass));
     size_t passLen = strlen(pass);
-    if (ssid[0] == '\0' || passLen < 8 || passLen > 63) {
+    if (ssid[0] == '\0' || passLen < 8 || passLen > 64) {
+        rtl_wifi::erase(pass, sizeof(pass));
         return kIOReturnBadArgument;
     }
 
     // PBKDF2 (4096 iterations) outside the work-loop gate.
     uint8_t pmk[32];
-    rtl_crypto::pbkdf2_sha1(pass, passLen, (const uint8_t*)ssid, strlen(ssid), 4096, pmk, 32);
+    if (!rtl_wifi::derivePMK(pass, passLen, (const uint8_t*)ssid, strlen(ssid), pmk)) {
+        rtl_wifi::erase(pass, sizeof(pass));
+        return kIOReturnBadArgument;
+    }
 
     struct Args { const RTL8723BEConnectParams *p; const char *ssid; const char *pass; uint8_t *pmk; } a =
         { params, ssid, pass, pmk };
     IOReturn ret = fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpConnect, &a);
-    memset(pmk, 0, sizeof(pmk));
-    memset(pass, 0, sizeof(pass));
+    rtl_wifi::erase(pmk, sizeof(pmk));
+    rtl_wifi::erase(pass, sizeof(pass));
     return ret;
 }
 
@@ -2589,15 +2846,19 @@ IOReturn RTL8723BE::beginConnect() {
     // Tune to the AP's channel from the last scan.
     for (uint32_t i = 0; i < fScanResults.count; ++i) {
         if (memcmp(fScanResults.aps[i].bssid, fConnectedBSSID, 6) == 0) {
-            setChannel(fScanResults.aps[i].channel);
+            if (!setChannel(fScanResults.aps[i].channel)) return kIOReturnBadArgument;
+            fPeer = fScanPeers[i];
+            fPeer.capabilities = fScanResults.aps[i].capabilities;
+            if (!(fOptions & kRTLOptionHT)) fPeer.ht = false;
             break;
         }
     }
     for (int i = 0; i < 6; ++i) mmio_write8(REG_BSSID + i, fConnectedBSSID[i]);
 
+    fWPA.begin(fPMK, fMyMAC, fConnectedBSSID, fPeer.rsn, fPeer.rsnLength);
     fState = kRTLStateAuthenticating;
+    fHandshakeDeadline = fLinkTicks + 5;
     fKeyInstalled = false;
-    fLastReplayCounter = 0;
 
     IOLog("RTL8723BE: Connecting to %s (BSSID %02x:%02x:%02x:%02x:%02x:%02x) on channel %u\n",
           fConnectedSSID, fConnectedBSSID[0], fConnectedBSSID[1], fConnectedBSSID[2],
@@ -2626,10 +2887,11 @@ void RTL8723BE::handleAuthResponse(const uint8_t *frame, size_t len) {
     if (seq != 2) return;
     if (status != 0) {
         IOLog("RTL8723BE: Authentication rejected (status %u)\n", status);
-        fState = kRTLStateDisconnected;
+        deauthTeardown();
         return;
     }
     fState = kRTLStateAssociating;
+    fHandshakeDeadline = fLinkTicks + 5;
     IOLog("RTL8723BE: Authenticated. Sending Association Request...\n");
 
     static const uint8_t rates[] = {0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24};
@@ -2641,7 +2903,8 @@ void RTL8723BE::handleAuthResponse(const uint8_t *frame, size_t len) {
     memcpy(f + pos, fMyMAC, 6); pos += 6;
     memcpy(f + pos, fConnectedBSSID, 6); pos += 6;
     f[pos++] = 0x00; f[pos++] = 0x00;
-    f[pos++] = 0x31; f[pos++] = 0x04;           // ESS | Privacy | Short Preamble | Short Slot
+    uint16_t capabilities = 0x0011 | (fPeer.capabilities & 0x0420);
+    f[pos++] = uint8_t(capabilities); f[pos++] = uint8_t(capabilities >> 8);
     f[pos++] = 0x0A; f[pos++] = 0x00;           // Listen interval
     size_t ssidLen = strlen(fConnectedSSID);
     f[pos++] = 0x00; f[pos++] = (uint8_t)ssidLen;
@@ -2649,6 +2912,7 @@ void RTL8723BE::handleAuthResponse(const uint8_t *frame, size_t len) {
     memcpy(f + pos, rates, sizeof(rates)); pos += sizeof(rates);
     memcpy(f + pos, extRates, sizeof(extRates)); pos += sizeof(extRates);
     pos += buildRsnIE(f + pos);
+    pos += rtl_wifi::associationIEs(fPeer, f + pos, sizeof(fTxFrame) - pos);
     transmitRawFrame(Q_MGNT, f, pos, DESC_RATE1M);
 }
 
@@ -2657,145 +2921,162 @@ void RTL8723BE::handleAssocResponse(const uint8_t *frame, size_t len) {
     uint16_t status = (uint16_t)(frame[26] | (frame[27] << 8));
     if (status != 0) {
         IOLog("RTL8723BE: Association rejected (status %u)\n", status);
-        fState = kRTLStateDisconnected;
+        deauthTeardown();
         return;
     }
     fAid = (uint16_t)((frame[28] | (frame[29] << 8)) & 0x3FFF);
+    rtl_wifi::Peer response;
+    if (!rtl_wifi::parseIEs(frame + 30, len - 30, response) || !fAid || fAid > 2007 ||
+        !(fPeer.rates & response.rates)) {
+        deauthTeardown(); return;
+    }
+    // The association response, rather than the beacon alone, confirms HT and WMM.
+    if (response.rates) fPeer.rates &= response.rates;
+    fPeer.ht = fPeer.ht && response.ht;
+    fPeer.wmm = fPeer.wmm && response.wmm;
+    fPeer.shortGI = fPeer.shortGI && response.shortGI;
+    fPeer.mcs &= response.mcs;
+    fPeer.capabilities &= uint16_t(frame[24] | (frame[25] << 8));
+    if (!fPeer.mcs) fPeer.ht = false;
+    if (response.wmm) memcpy(fPeer.edca, response.edca, sizeof(fPeer.edca));
+    configurePeer();
     fState = kRTLStateHandshake;
+    fHandshakeDeadline = fLinkTicks + 15;
     mmio_write8(REG_MSR, (uint8_t)((mmio_read8(REG_MSR) & 0xFC) | 0x02)); // station, linked
     IOLog("RTL8723BE: Associated (AID %u). Awaiting WPA2 4-Way Handshake...\n", fAid);
 }
 
+// Linux rtlwifi/cam.c: pairwise entry 4, AES cipher 4, valid written last.
+// RX decryption stays disabled: software authenticates MICs and enforces per-TID replay.
+bool RTL8723BE::installTxKey() {
+    uint32_t words[8] = {};
+    rtlCCMPPairwiseCAM(fConnectedBSSID, fPTK + 32, words);
+    bool ok = true;
+    for (int i = 7; i >= 0; --i) {
+        mmio_write32(REG_CAMWRITE, words[i]);
+        mmio_write32(REG_CAMCMD, 0x80010000U | uint32_t(4 * 8 + i));
+        unsigned polls = 0;
+        while (mmio_read32(REG_CAMCMD) & (1U << 31)) {
+            if (++polls == 100) { ok = false; break; }
+            IODelay(10);
+        }
+        if (!ok) break;
+    }
+    rtl_wifi::erase(words, sizeof(words));
+    if (ok) mmio_write8(REG_SECCFG, 1U << 2); // SCR_TXENCENABLE only
+    return ok;
+}
+
+IOReturn RTL8723BE::getLinkInfo(RTL8723BELinkInfo *out) {
+    if (!out || !fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpLinkInfo, out);
+}
+IOReturn RTL8723BE::setOptions(uint32_t options) {
+    if (!fCommandGate) return kIOReturnNotReady;
+    return fCommandGate->runAction(&RTL8723BE::gatedCall, (void *)(uintptr_t)kOpOptions, (void *)(uintptr_t)options);
+}
+
+// Linux rtl8723be_update_hal_rate_mask(): one-stream HT20, or negotiated b/g.
+void RTL8723BE::configurePeer() {
+    setBandwidth20();
+    fDataRate = rtl_wifi::highestRate(fPeer);
+    fRateID = fPeer.ht ? 1 : ((fPeer.rates & 0xff0) ? 6 : 8);
+    uint32_t bitmap = fPeer.rates | (fPeer.ht ? uint32_t(fPeer.mcs) << 12 : 0);
+    uint8_t mask[7] = {0, uint8_t(fRateID | (fPeer.shortGI && fPeer.ht ? 0x80 : 0)), 0,
+                      uint8_t(bitmap), uint8_t(bitmap >> 8), uint8_t(bitmap >> 16), uint8_t(bitmap >> 24)};
+    fFirmwareRA = sendH2C(0x40, mask, sizeof(mask));
+    const uint8_t media[3] = {1,0,0};
+    sendH2C(0x01, media, sizeof(media)); // MEDIA_STATUS_RPT, MACID 0 connected
+    mmio_write32(REG_RRSR, (mmio_read32(REG_RRSR) & ~0xfffU) | fPeer.basicRates);
+    // Linux rtl8723be_update_channel_access_setting()/HW_VAR_ACK_PREAMBLE.
+    const uint8_t slot = fPeer.capabilities & 0x0400 ? 9 : 20;
+    const uint8_t sifs = fPeer.ht ? 14 : 10;
+    mmio_write8(0x051b, slot);
+    mmio_write8(0x0515, sifs); mmio_write8(0x0517, sifs);
+    mmio_write8(0x0429, sifs); mmio_write8(0x063b, sifs);
+    mmio_write16(0x063e, 0x0e0e);
+    const uint8_t preamble = mmio_read8(REG_TRXPTCL_CTL + 2);
+    mmio_write8(REG_TRXPTCL_CTL + 2, (preamble & ~2U) | (fPeer.capabilities & 0x0020 ? 2 : 0));
+    // Defaults from Linux; overwrite only complete, validated WMM parameter sets.
+    static const uint16_t regs[] = {0x508,0x50c,0x504,0x500};
+    static const uint32_t defaults[] = {0x005ea42b,0x0000a44f,0x005e4322,0x002f3222};
+    for (unsigned i = 0; i < 4; ++i) {
+        uint32_t value = fPeer.edca[i] ? fPeer.edca[i] : defaults[i];
+        if (fPeer.edca[i]) value = (value & ~255U) | (10 + ((value & 255U) - 10) / 9 * slot);
+        mmio_write32(regs[i], value);
+    }
+    IOLog("RTL8723BE: peer %s rates=0x%03x MCS=0x%02x SGI=%u WMM=%u\n",
+          fPeer.ht ? "HT20" : "b/g", fPeer.rates, fPeer.mcs, fPeer.shortGI, fPeer.wmm);
+}
+
 void RTL8723BE::handleEAPOLFrame(const uint8_t *frame, size_t len, size_t hdrLen) {
+    const size_t offset = hdrLen + 8;
+    if (len >= offset) handleEAPOLKey(frame + offset, len - offset);
+}
+
+void RTL8723BE::handleEAPOLKey(const uint8_t *e, size_t len) {
     if (fState != kRTLStateHandshake && fState != kRTLStateConnected) return;
-    const size_t eapolStart = hdrLen + 8;
-    if (len < eapolStart + 99) return;
-    const uint8_t *e = frame + eapolStart;
-    if (e[1] != 0x03 || (e[4] != 0x02 && e[4] != 0xFE)) return; // EAPOL-Key, RSN descriptor
-    const size_t eapolLen = 4 + (size_t)((e[2] << 8) | e[3]);
-    if (eapolLen < 99 || eapolStart + eapolLen > len) return;
-
-    const uint16_t keyInfo = (uint16_t)((e[5] << 8) | e[6]);
-    const bool isMic = (keyInfo & 0x0100) != 0;
-    const bool isInstall = (keyInfo & 0x0040) != 0;
-    const bool isAck = (keyInfo & 0x0080) != 0;
-    if (!isAck || !(keyInfo & 0x0008)) return; // must be a pairwise frame from the authenticator
-
-    uint64_t replay = 0;
-    for (int i = 0; i < 8; ++i) replay = (replay << 8) | e[9 + i];
-
-    if (!isMic) {
-        // Message 1
-        if (fLastReplayCounter > 0 && replay < fLastReplayCounter) return;
-        bool retransmit = (replay == fLastReplayCounter && fLastReplayCounter > 0 &&
-                           memcmp(fANonce, e + 17, 32) == 0);
-        memcpy(fANonce, e + 17, 32);
-        fLastReplayCounter = replay;
-        if (!retransmit) {
-            read_random(fSNonce, sizeof(fSNonce));
-        }
-        rtl_crypto::prf_512(fPMK, "Pairwise key expansion", fConnectedBSSID, fMyMAC, fANonce, fSNonce, fPTK);
-
-        uint8_t *m2 = fTxFrame;
-        m2[0] = 0x08; m2[1] = 0x01; m2[2] = 0x00; m2[3] = 0x00;   // Data, To-DS
-        memcpy(m2 + 4, fConnectedBSSID, 6);
-        memcpy(m2 + 10, fMyMAC, 6);
-        memcpy(m2 + 16, fConnectedBSSID, 6);
-        m2[22] = 0x00; m2[23] = 0x00;
-        static const uint8_t llc[] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
-        memcpy(m2 + 24, llc, 8);
-        uint8_t *k = m2 + 32;
-        memset(k, 0, 99);
-        uint8_t rsn[32];
-        size_t rsnLen = buildRsnIE(rsn);
-        size_t bodyLen = 95 + rsnLen;
-        k[0] = 0x02; k[1] = 0x03;
-        k[2] = (uint8_t)(bodyLen >> 8); k[3] = (uint8_t)bodyLen;
-        k[4] = 0x02;
-        k[5] = 0x01; k[6] = 0x0A;          // Pairwise | MIC | HMAC-SHA1/AES
-        for (int i = 0; i < 8; ++i) k[9 + i] = e[9 + i];
-        memcpy(k + 17, fSNonce, 32);
-        k[97] = 0x00; k[98] = (uint8_t)rsnLen;
-        memcpy(k + 99, rsn, rsnLen);
-        uint8_t digest[20];
-        rtl_crypto::hmac_sha1(fPTK, 16, k, 4 + bodyLen, digest);
-        memcpy(k + 81, digest, 16);
-        transmitRawFrame(Q_MGNT, m2, 32 + 4 + bodyLen, DESC_RATE1M);
-        IOLog("RTL8723BE: Received EAPOL M1. Transmitted EAPOL M2.\n");
-        return;
-    }
-
-    if (!isInstall) return; // group-key handshake not implemented
-
-    // Message 3
-    if (replay <= fLastReplayCounter && fKeyInstalled) return;
-    uint8_t verify[512];
-    if (eapolLen > sizeof(verify)) return;
-    memcpy(verify, e, eapolLen);
-    uint8_t rxMic[16];
-    memcpy(rxMic, verify + 81, 16);
-    memset(verify + 81, 0, 16);
-    uint8_t digest[20];
-    rtl_crypto::hmac_sha1(fPTK, 16, verify, eapolLen, digest);
-    if (memcmp(rxMic, digest, 16) != 0) {
-        IOLog("RTL8723BE: EAPOL M3 MIC verification failed!\n");
-        return;
-    }
-    fLastReplayCounter = replay;
-
-    // Key data is AES-key-wrapped (Encrypted Key Data bit); walk its elements for the GTK KDE.
-    uint16_t kdLen = (uint16_t)((verify[97] << 8) | verify[98]);
-    if ((keyInfo & 0x1000) && kdLen >= 24 && 99 + (size_t)kdLen <= eapolLen) {
-        uint8_t unwrapped[256];
-        if (rtl_crypto::aes_key_unwrap(fPTK + 16, verify + 99, kdLen, unwrapped, sizeof(unwrapped))) {
-            size_t plainLen = kdLen - 8;
-            for (size_t off = 0; off + 2 <= plainLen; ) {
-                uint8_t id = unwrapped[off], l = unwrapped[off + 1];
-                if (id == 0xDD && l == 0 ) break; // padding
-                if (off + 2 + l > plainLen) break;
-                if (id == 0xDD && l >= 6 + 16 && unwrapped[off + 2] == 0x00 && unwrapped[off + 3] == 0x0F &&
-                    unwrapped[off + 4] == 0xAC && unwrapped[off + 5] == 0x01) {
-                    memcpy(fGTK, unwrapped + off + 8, 16);
-                }
-                off += 2 + l;
-            }
-            memset(unwrapped, 0, sizeof(unwrapped));
-        }
-    }
-
-    if (!fKeyInstalled) {
-        fKeyInstalled = true;
+    // EAPOL can carry Ethernet padding, which is outside its authenticated length.
+    if (len < 4) return;
+    const size_t packetLen = 4 + size_t((e[2] << 8) | e[3]);
+    if (packetLen > len) return;
+    uint8_t randomNonce[32];
+    read_random(randomNonce, sizeof(randomNonce));
+    uint8_t *reply = fTxPlain + 8;
+    rtl_wifi::Supplicant::Result result;
+    bool valid = fWPA.receive(e, packetLen, randomNonce, reply, sizeof(fTxPlain) - 8, result);
+    rtl_wifi::erase(randomNonce, sizeof(randomNonce));
+    if (!valid) return;
+    if (result.pairwiseChanged) {
+        memcpy(fPTK, fWPA.ptk(), sizeof(fPTK));
         fTxPN = 1;
-        for (int i = 0; i < 16; ++i) fRxPtkPN[i] = 0;
-        for (int i = 0; i < 4; ++i)  fRxGtkPN[i] = 0;
-        IOLog("RTL8723BE: Installing TK & GTK keys. Link is now secure.\n");
-    } else {
-        IOLog("RTL8723BE: Retransmitted M3 detected. Preserving existing TK and TX PN.\n");
+        memset(fRxPtkPN, 0, sizeof(fRxPtkPN));
+        fKeyInstalled = true;
+        fTxCrypto = false;
+        mmio_write8(REG_SECCFG, 0);
+        if (fOptions & kRTLOptionTxCrypto) {
+            fTxCrypto = installTxKey();
+            if (!fTxCrypto) IOLog("RTL8723BE: CAM programming failed; using software CCMP\n");
+        }
     }
-
-    uint8_t *m4 = fTxFrame;
-    m4[0] = 0x08; m4[1] = 0x01; m4[2] = 0x00; m4[3] = 0x00;
-    memcpy(m4 + 4, fConnectedBSSID, 6);
-    memcpy(m4 + 10, fMyMAC, 6);
-    memcpy(m4 + 16, fConnectedBSSID, 6);
-    m4[22] = 0x00; m4[23] = 0x00;
-    static const uint8_t llc[] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E};
-    memcpy(m4 + 24, llc, 8);
-    uint8_t *k = m4 + 32;
-    memset(k, 0, 99);
-    k[0] = 0x02; k[1] = 0x03; k[2] = 0x00; k[3] = 0x5F;
-    k[4] = 0x02;
-    k[5] = 0x03; k[6] = 0x0A;              // Pairwise | MIC | Secure
-    for (int i = 0; i < 8; ++i) k[9 + i] = e[9 + i];
-    uint8_t d4[20];
-    rtl_crypto::hmac_sha1(fPTK, 16, k, 99, d4);
-    memcpy(k + 81, d4, 16);
-    transmitRawFrame(Q_MGNT, m4, 32 + 99, DESC_RATE1M);
-
-    fState = kRTLStateConnected;
-    setLinkStatus(kIONetworkLinkActive | kIONetworkLinkValid, getSelectedMedium());
-    refreshLED(true);
-    IOLog("RTL8723BE: WPA2 Handshake Complete! Connected to %s.\n", fConnectedSSID);
+    for (unsigned i = 0; i < 4; ++i) if (result.groupChanged & (1U << i))
+        for (unsigned tid = 0; tid < 16; ++tid) fRxGtkPN[i][tid] = fWPA.gtkRSC(i);
+    memset(fTxFrame, 0, 32);
+    fTxFrame[0] = 0x08; fTxFrame[1] = 0x01;
+    memcpy(fTxFrame + 4, fConnectedBSSID, 6);
+    memcpy(fTxFrame + 10, fMyMAC, 6);
+    memcpy(fTxFrame + 16, fConnectedBSSID, 6);
+    static const uint8_t llc[] = {0xAA,0xAA,0x03,0,0,0,0x88,0x8E};
+    size_t txLength = 32 + result.replyLength;
+    if ((e[6] & 8) == 0 && fKeyInstalled) {
+        // Group-key message 2 uses the installed pairwise protection (OpenBSD PAE output).
+        if (fTxPN >= (1ULL << 48)) { deauthTeardown(); return; }
+        uint64_t pn = fTxPN++;
+        fTxFrame[1] = 0x41;
+        uint8_t *iv = fTxFrame + 24;
+        iv[0] = uint8_t(pn); iv[1] = uint8_t(pn >> 8); iv[2] = 0; iv[3] = 0x20;
+        for (unsigned i = 0; i < 4; ++i) iv[4 + i] = uint8_t(pn >> (16 + i * 8));
+        memcpy(fTxPlain, llc, sizeof(llc));
+        uint8_t nonce[13], aad[30], mic[8];
+        rtl_crypto::ccmp_build_nonce(fTxFrame, 24, pn, nonce);
+        size_t aadLength = rtl_crypto::ccmp_build_aad(fTxFrame, 24, aad);
+        if (!rtl_crypto::ccmp_encrypt(fPTK + 32, nonce, aad, aadLength, fTxPlain,
+                                     8 + result.replyLength, fTxFrame + 32, mic)) return;
+        txLength = 40 + result.replyLength + 8;
+        memcpy(fTxFrame + txLength - 8, mic, sizeof(mic));
+    } else {
+        memcpy(fTxFrame + 24, llc, sizeof(llc));
+        memcpy(fTxFrame + 32, reply, result.replyLength);
+    }
+    if (!transmitRawFrame(Q_MGNT, fTxFrame, txLength, DESC_RATE1M)) return;
+    if (fWPA.connected() && fState != kRTLStateConnected) {
+        fState = kRTLStateConnected;
+        fLastBSSActivity = fLinkTicks;
+        setLinkStatus(kIONetworkLinkActive | kIONetworkLinkValid, getSelectedMedium());
+        refreshLED(true);
+        IOLog("RTL8723BE: WPA2 connected to %s (%s, firmware RA %s)\n", fConnectedSSID,
+              fPeer.ht ? "HT20" : "legacy", fFirmwareRA ? "on" : "off");
+    }
 }
 
 void RTL8723BE::handleDeauthFrame(const uint8_t *frame, size_t len) {
@@ -2803,6 +3084,25 @@ void RTL8723BE::handleDeauthFrame(const uint8_t *frame, size_t len) {
     IOLog("RTL8723BE: Received %s from AP (reason %u). Tearing down link.\n",
           ((frame[0] >> 4) & 0xF) == 12 ? "Deauthentication" : "Disassociation", reason);
     deauthTeardown();
+}
+
+void RTL8723BE::handleActionFrame(const uint8_t *frame, size_t len) {
+    if (fState != kRTLStateConnected || !fPeer.ht || len < 33 || frame[24] != 3 || frame[25] != 0) return;
+    // OpenBSD ieee80211_get_addba_resp(), refusal branch. Never accept an agreement
+    // before a replay-safe reorder queue and hardware BA context exist.
+    uint16_t params = uint16_t(frame[27] | (frame[28] << 8));
+    uint16_t tidOnly = params & 0x003c;
+    uint8_t token = frame[26];
+    uint8_t *reply = fTxFrame;
+    memset(reply, 0, 33);
+    reply[0] = 0xd0;
+    memcpy(reply + 4, fConnectedBSSID, 6);
+    memcpy(reply + 10, fMyMAC, 6);
+    memcpy(reply + 16, fConnectedBSSID, 6);
+    reply[24] = 3; reply[25] = 1; reply[26] = token;
+    reply[27] = 37; // IEEE80211_STATUS_REFUSED
+    reply[29] = uint8_t(tidOnly); reply[30] = uint8_t(tidOnly >> 8);
+    transmitRawFrame(Q_MGNT, reply, 33, DESC_RATE1M);
 }
 
 void RTL8723BE::deauthTeardown() {
@@ -2821,14 +3121,24 @@ void RTL8723BE::deauthTeardown() {
     mmio_write8(REG_MSR, (uint8_t)(mmio_read8(REG_MSR) & 0xFC));
     for (int i = 0; i < 6; ++i) mmio_write8(REG_BSSID + i, 0);
 
-    memset(fPTK, 0, sizeof(fPTK));
-    memset(fGTK, 0, sizeof(fGTK));
-    memset(fPMK, 0, sizeof(fPMK));
+    fTxCrypto = false;
+    mmio_write8(REG_SECCFG, 0);
+    mmio_write32(REG_CAMWRITE, 0);
+    mmio_write32(REG_CAMCMD, 0x80010020U); // invalidate pairwise CAM entry 4
+    const uint8_t media[3] = {0,0,0};
+    sendH2C(0x01, media, sizeof(media));
+    rtl_wifi::erase(fPTK, sizeof(fPTK));
+    fWPA.reset();
+    memset(&fPeer, 0, sizeof(fPeer));
+    fDataRate = DESC_RATE1M;
+    fRateID = 8;
+    fFirmwareRA = false;
+    rtl_wifi::erase(fPMK, sizeof(fPMK));
     fKeyInstalled = false;
-    fLastReplayCounter = 0;
     fTxPN = 1;
     for (int i = 0; i < 16; ++i) fRxPtkPN[i] = 0;
-    for (int i = 0; i < 4; ++i)  fRxGtkPN[i] = 0;
+    memset(fRxGtkPN, 0, sizeof(fRxGtkPN));
+    fLinkRSSI = -100;
     fState = kRTLStateDisconnected;
 }
 
@@ -2861,11 +3171,12 @@ UInt32 RTL8723BE::outputPacket(mbuf_t m, void *param) {
         freePacket(m);
         return kIOReturnOutputDropped;
     }
-    mbuf_copydata(m, 0, pktLen, fOutEth);
-    freePacket(m);
+    if (fTxRingDescVirt[Q_BE][fTxHostIdx[Q_BE]].get_own()) return kIOReturnOutputStall;
+    if (mbuf_copydata(m, 0, pktLen, fOutEth) != 0) { freePacket(m); return kIOReturnOutputDropped; }
 
     uint16_t etherType = (uint16_t)((fOutEth[12] << 8) | fOutEth[13]);
     if (etherType == 0x888E) {
+        freePacket(m);
         return kIOReturnOutputDropped; // user space must not inject EAPOL
     }
     const uint8_t *da = fOutEth;
@@ -2873,7 +3184,7 @@ UInt32 RTL8723BE::outputPacket(mbuf_t m, void *param) {
     size_t payloadLen = pktLen - 14;
 
     uint8_t *frame = fOutFrame;
-    frame[0] = 0x88;                 // QoS Data
+    frame[0] = fPeer.wmm ? 0x88 : 0x08;
     frame[1] = 0x41;                 // To-DS | Protected
     frame[2] = 0x00; frame[3] = 0x00;
     memcpy(frame + 4, fConnectedBSSID, 6);
@@ -2881,8 +3192,10 @@ UInt32 RTL8723BE::outputPacket(mbuf_t m, void *param) {
     memcpy(frame + 16, da, 6);
     frame[22] = 0x00; frame[23] = 0x00;
     frame[24] = 0x00; frame[25] = 0x00;
-    size_t pos = 26;
+    const size_t headerLength = fPeer.wmm ? 26 : 24;
+    size_t pos = headerLength;
 
+    if (fTxPN >= (1ULL << 48)) { deauthTeardown(); freePacket(m); return kIOReturnOutputDropped; }
     uint64_t pn = fTxPN++;
     frame[pos + 0] = (uint8_t)(pn & 0xFF);
     frame[pos + 1] = (uint8_t)((pn >> 8) & 0xFF);
@@ -2896,11 +3209,12 @@ UInt32 RTL8723BE::outputPacket(mbuf_t m, void *param) {
 
     uint8_t nonce[13];
     uint8_t aad[30];
-    rtl_crypto::ccmp_build_nonce(frame, 26, pn, nonce);
-    size_t aadLen = rtl_crypto::ccmp_build_aad(frame, 26, aad);
+    rtl_crypto::ccmp_build_nonce(frame, headerLength, pn, nonce);
+    size_t aadLen = rtl_crypto::ccmp_build_aad(frame, headerLength, aad);
 
     size_t plainLen = 8 + payloadLen;
     if (plainLen > sizeof(fTxPlain) || pos + plainLen + 8 > sizeof(fOutFrame)) {
+        freePacket(m);
         return kIOReturnOutputDropped;
     }
     fTxPlain[0] = 0xAA; fTxPlain[1] = 0xAA; fTxPlain[2] = 0x03;
@@ -2909,18 +3223,26 @@ UInt32 RTL8723BE::outputPacket(mbuf_t m, void *param) {
     fTxPlain[7] = (uint8_t)(etherType & 0xFF);
     memcpy(fTxPlain + 8, payload, payloadLen);
 
-    uint8_t mic[8];
-    rtl_crypto::ccmp_encrypt(fPTK + 32, nonce, aad, aadLen, fTxPlain, plainLen, frame + pos, mic);
-    pos += plainLen;
-    memcpy(frame + pos, mic, 8);
-    pos += 8;
+    if (fTxCrypto) {
+        // mac80211/wpa.c: hardware receives the software IV and plaintext, without MIC.
+        memcpy(frame + pos, fTxPlain, plainLen);
+        pos += plainLen;
+    } else {
+        uint8_t mic[8];
+        if (!rtl_crypto::ccmp_encrypt(fPTK + 32, nonce, aad, aadLen, fTxPlain, plainLen, frame + pos, mic)) {
+            freePacket(m); return kIOReturnOutputDropped;
+        }
+        pos += plainLen;
+        memcpy(frame + pos, mic, 8); pos += 8;
+    }
 
     // The MAC appends the FCS itself.
-    if (!transmitRawFrame(Q_BE, frame, pos, DESC_RATE24M)) {
+    if (!transmitRawFrame(Q_BE, frame, pos, fDataRate)) {
         fTxErrors++;
         if (fNetStats) fNetStats->outputErrors++;
-        return kIOReturnOutputDropped;
+        return kIOReturnOutputStall;
     }
+    freePacket(m);
     if (fNetStats) fNetStats->outputPackets++;
     fTxBytes += pktLen;
     return kIOReturnOutputSuccess;

@@ -145,7 +145,8 @@
 #define REG_RCR                  0x0608 // 32-bit (Receive Configuration)
 #define REG_CAMCMD               0x0670 // 32-bit (CAM Command)
 #define REG_CAMWRITE             0x0674 // 32-bit (CAM Write)
-#define REG_SECCFG               0x0680 // 16-bit (Security Configuration)
+#define REG_SECCFG               0x0680 // 8-bit (Security Configuration)
+#define REG_TRXPTCL_CTL          0x0668 // Linux rtl8723be/reg.h (ACK preamble)
 #define REG_RFPGA0_XA_LSSI       0x0840 // 32-bit (3-Wire LSSI RF Control)
 #define REG_BB_PAD_CTRL          0x092C // 32-bit (Antenna Switch Control)
 #define REG_BB_ANT_DIV           0x092C // Alias for antenna diversity
@@ -275,6 +276,10 @@ struct alignas(4) TxDescPci {
     void set_bmc(bool v) { if (v) dw0 |= (1U << 24); else dw0 &= ~(1U << 24); }
     void set_macid(uint8_t id) { dw1 = (dw1 & ~0x7FU) | (id & 0x7FU); }
     void set_rate_id(uint8_t id) { dw1 = (dw1 & ~(0x1FU << 16)) | ((uint32_t)(id & 0x1FU) << 16); }
+    void set_security(uint8_t v) { dw1 = (dw1 & ~(3U << 22)) | (uint32_t(v & 3) << 22); }
+    void set_shortgi(bool v) { if (v) dw5 |= (1U << 4); else dw5 &= ~(1U << 4); }
+    void set_cts_to_self(bool v) { if (v) dw3 |= (1U << 11); else dw3 &= ~(1U << 11); }
+    void set_rts_rate(uint8_t v) { dw4 = (dw4 & ~(31U << 24)) | (uint32_t(v & 31) << 24); }
     void set_use_rate(bool v) { if (v) dw3 |= (1U << 8); else dw3 &= ~(1U << 8); }
     void set_disable_fb(bool v) { if (v) dw3 |= (1U << 10); else dw3 &= ~(1U << 10); }
     void set_tx_rate(uint8_t r) { dw4 = (dw4 & ~0x7FU) | (r & 0x7FU); }
@@ -316,6 +321,14 @@ inline bool rtlDmaRangeValid(uint64_t address, size_t size, size_t alignment) {
            size - 1 <= 0xFFFFFFFFULL - address;
 }
 
+// Linux rtlwifi/cam.c rtl_cam_program_entry(): AES, pairwise key ID zero.
+inline void rtlCCMPPairwiseCAM(const uint8_t mac[6], const uint8_t key[16], uint32_t words[8]) {
+    for (unsigned i = 0; i < 8; ++i) words[i] = 0;
+    words[0] = 0x8010U | (uint32_t(mac[0]) << 16) | (uint32_t(mac[1]) << 24);
+    for (unsigned i = 0; i < 4; ++i) words[1] |= uint32_t(mac[i + 2]) << (8 * i);
+    for (unsigned i = 0; i < 16; ++i) words[2 + i / 4] |= uint32_t(key[i]) << (8 * (i % 4));
+}
+
 // 32-Byte RX Descriptor Layout (8 dwords = 32 bytes)
 struct alignas(4) RxDesc32 {
     volatile uint32_t dw0;
@@ -328,6 +341,7 @@ struct alignas(4) RxDesc32 {
     uint32_t dw7_bufferaddress64;
 
     uint16_t get_length() const { return (uint16_t)(dw0 & 0x3FFFU); }
+    bool get_c2h_report() const { return (dw2 & (1U << 28)) != 0; }
     void set_length(uint16_t len) { dw0 = (dw0 & ~0x3FFFU) | ((uint32_t)len & 0x3FFFU); }
 
     bool get_crc32_err() const { return (dw0 & (1U << 14)) != 0; }

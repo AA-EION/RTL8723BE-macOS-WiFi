@@ -8,13 +8,33 @@
 		<data>
 		bfjKztGElrrH6WfztNRCNvhPuGo=
 		</data>
+		<key>Resources/Audio Incident.txt</key>
+		<data>
+		eGyyd3b8Y8i4zX6vO0taQ1Lwfxw=
+		</data>
+		<key>Resources/Bluetooth Guide.txt</key>
+		<data>
+		uct31GBKyq7cALSVUT5175vZNLQ=
+		</data>
+		<key>Resources/Feature Status.txt</key>
+		<data>
+		NhVruKZjY+IOcfxUDoE8MeFFdpk=
+		</data>
 		<key>Resources/Licenses/GPL-2.0-only.txt</key>
 		<data>
 		W0i5Dhuv2+3lewEiet4w1R9LKjw=
 		</data>
 		<key>Resources/Licenses/LICENSE</key>
 		<data>
-		i4uyUOY3uKSJxHlugxHGcpq15zo=
+		1bRKpTb7VtmOICmwMXBxlDE7vpE=
+		</data>
+		<key>Resources/Licenses/LicenseRef-OpenBSD-net80211.txt</key>
+		<data>
+		Lcu9Z4+3g8ck4OI92RzV8IS0loA=
+		</data>
+		<key>Resources/Licenses/LicenseRef-rtl-bt-firmware.txt</key>
+		<data>
+		zOTrpXP6VcbH8ZonR5HKe0JXVnc=
 		</data>
 		<key>Resources/Licenses/LicenseRef-rtlwifi-firmware.txt</key>
 		<data>
@@ -26,31 +46,59 @@
 		</data>
 		<key>Resources/Licenses/NOTICE.md</key>
 		<data>
-		eYWedTtRggE3vdzdHfKUHUO8+pE=
+		/BQ9KBpuw3JU0EH3VA63xch06do=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/Info.plist</key>
 		<data>
-		nwvtzULxd38pDtuRkuuiAvJhg9E=
+		fubR7KRyasGOA5jdp1JVSs3z5S0=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<data>
-		521ppI3PMpEraqAya8OERlQS/ok=
+		oOw7Rn+qUxLaeyBypocSishFc6s=
 		</data>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
 		<data>
 		YwoIhzByBpYWzcwx9V5tdCMIbXg=
 		</data>
+		<key>Resources/RTL8723BluetoothFirmware.kext/Contents/Info.plist</key>
+		<data>
+		dfxIPzyTx9aDvEoOMJDkjlqjREg=
+		</data>
+		<key>Resources/RTL8723BluetoothFirmware.kext/Contents/MacOS/RTL8723BluetoothFirmware</key>
+		<data>
+		FYGeehPKi5+riV+si1Na8Zq2hV0=
+		</data>
+		<key>Resources/RTL8723BluetoothFirmware.kext/Contents/_CodeSignature/CodeResources</key>
+		<data>
+		YwoIhzByBpYWzcwx9V5tdCMIbXg=
+		</data>
 		<key>Resources/Testing Guide.txt</key>
 		<data>
-		Ff/saBC48HR+FkzRrANeg6QzaGI=
+		M0kPbyCat314ta3Yfj1ceBNKkJ4=
+		</data>
+		<key>Resources/Upstream Sources.txt</key>
+		<data>
+		xd3WMCLbCTKNwRmC5CamDgQ74io=
+		</data>
+		<key>Resources/Validation Record.txt</key>
+		<data>
+		jfRgt1Bg8pYyyewAPyTyLB+qb1k=
+		</data>
+		<key>Resources/load_bluetooth_kext.sh</key>
+		<data>
+		P1+VVs/af/Tfl0xFmW/1asHqm1k=
 		</data>
 		<key>Resources/load_test_kext.sh</key>
 		<data>
-		Gj1on8Zya90LdTkAcxU29UUR5FU=
+		0GYtfaAst6GcEC5qcltlNb5dJeU=
 		</data>
 		<key>Resources/rtl8723be_cli</key>
 		<data>
-		VEDX3ag5VsvB3j8mPCDlFPUFf+E=
+		KHuociceJ0XJJJAGDe4HmTa63rw=
+		</data>
+		<key>Resources/upstream-sources.json</key>
+		<data>
+		CMaUX+rRCcjJvpQqjYnax7yIHoE=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -60,6 +108,27 @@
 			<key>hash2</key>
 			<data>
 			u9UYRraM0N7SOwV9gCQYromE4ZKJIAK2++A8EwKBC+A=
+			</data>
+		</dict>
+		<key>Resources/Audio Incident.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ZD72FjyPjy0W+5OkUEC7Nb/K3kaePkjw+eDnvY4ei+8=
+			</data>
+		</dict>
+		<key>Resources/Bluetooth Guide.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			f53x0nHTmdYOLMwnqIUhAjD8FsNAt8RCBa9L4Yj1QR4=
+			</data>
+		</dict>
+		<key>Resources/Feature Status.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			LoN5eMAb+HrS27p8sop6gFnEbYf3+TBRJUrW6MPMgLU=
 			</data>
 		</dict>
 		<key>Resources/Licenses/GPL-2.0-only.txt</key>
@@ -73,7 +142,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			OasCcM5SxrF7PwfYQoWfUTpwn5mIiIG6wTvawmq3NEE=
+			Q0SRslyHyWO9J9L/NGLsVBZhbARRaWLD1jcD+/5wxKs=
+			</data>
+		</dict>
+		<key>Resources/Licenses/LicenseRef-OpenBSD-net80211.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			1a1bmYC+NyZ7KCKbZI8XJYTPrmGRnl9rvJtxBvTryLU=
+			</data>
+		</dict>
+		<key>Resources/Licenses/LicenseRef-rtl-bt-firmware.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			phNRZltPJk9sYxNk+FuQfY+PQfizaVM+9AIXZfnzti4=
 			</data>
 		</dict>
 		<key>Resources/Licenses/LicenseRef-rtlwifi-firmware.txt</key>
@@ -94,24 +177,45 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			fn5+KQcGV9kCQ+YO6H5NsYWo85txcVToFM6js5BXdp8=
+			4e4C7ndDTJah4a4SOawiLJ2mxgFy2EdnMMPixsBWNIs=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/Info.plist</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			FLVHWuljykQYnUILIb0q1IaglbTfSt2KHreGkc/P9xU=
+			eBvwXJTe8APjm6+tQYPxBmTqCio9Dj9FuGKMN29vQic=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/MacOS/RTL8723BEWiFi</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			zUvD3SY1LH9S6chvrFe6/cFKZ7ysH3scQw9PlWf0x6g=
+			A1FJkrf4xdEjdlYLzyFL1rybQTyJZwgQL7uhMICj9AY=
 			</data>
 		</dict>
 		<key>Resources/RTL8723BEWiFi.kext/Contents/_CodeSignature/CodeResources</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ZobeEKKKL+EbNsu4bcusyCfPxOoRa02r8YReWu5inps=
+			</data>
+		</dict>
+		<key>Resources/RTL8723BluetoothFirmware.kext/Contents/Info.plist</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			8zDBp5fDKimHmOW8BU7jr8D/XREfsJrmFvPg91p5Fxo=
+			</data>
+		</dict>
+		<key>Resources/RTL8723BluetoothFirmware.kext/Contents/MacOS/RTL8723BluetoothFirmware</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			nCQ41G0rqSWAPOLu/yq+/pqC9okLqsoLw+eB6+g5vDk=
+			</data>
+		</dict>
+		<key>Resources/RTL8723BluetoothFirmware.kext/Contents/_CodeSignature/CodeResources</key>
 		<dict>
 			<key>hash2</key>
 			<data>
@@ -122,21 +226,49 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			shO7GL9ihAbu8JPmWbT3pYp6Tkzc645BlLtsGPAARNs=
+			gZ2X26KHaTmzRhgLxk4XR/Cf8DdFqw2aEYm4XowVbJc=
+			</data>
+		</dict>
+		<key>Resources/Upstream Sources.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			b8BwLDP2JZoL7fXvH5LfwyEpJnLd0wJD1lgljTkV2EI=
+			</data>
+		</dict>
+		<key>Resources/Validation Record.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			YG1MSEeGEj5/q3HOZ8qG8XZcnBodmS1SPLtiJ5CFDn0=
+			</data>
+		</dict>
+		<key>Resources/load_bluetooth_kext.sh</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			GJwBJVMymKJJj2A7EUQFHxMUUofilEYzypF5lHh0o40=
 			</data>
 		</dict>
 		<key>Resources/load_test_kext.sh</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			xkWiu5Lw4Tum6KHiKJ4C9OoCsnbt28hAVX7b/5VI6DM=
+			0HEKNC198fVqhJQPJf356AKz8nNtaiYW0F2Uvdam1Ew=
 			</data>
 		</dict>
 		<key>Resources/rtl8723be_cli</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			K4QhV5fdjZE+mnYlRUp1VG05UdWcPGNVoOziiAMbuHY=
+			5P6JlLl8m/8vRa+csGg/ruHe89jb7o5wL5wXw7U6nds=
+			</data>
+		</dict>
+		<key>Resources/upstream-sources.json</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ZdsLm53NxDJbAzcb8Han52G7tGvBXgj0TZQolAhAbFw=
 			</data>
 		</dict>
 	</dict>

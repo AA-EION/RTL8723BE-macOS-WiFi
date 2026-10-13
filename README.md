@@ -31,15 +31,27 @@ RTL8723BE Wi-Fi fixes that. It adds a driver for the card and an app to scan and
 so your Mac gets online without a USB dongle or a card swap.
 
 - **Scan and join 2.4 GHz networks** secured with WPA2 Personal.
-- **One click to connect.** Pick a network, type the password, done.
+- **Saved passwords and auto-join.** Successful joins can be remembered in your login Keychain.
+- **HT20 development support.** One-stream MCS0–7, SGI20 and WMM negotiation, with optional hardware TX CCMP.
+- **Separate Bluetooth firmware loader**, bundled in the same installer, with native macOS controls when its dependencies are present.
 - **Lives in the menu bar**, with live upload and download speeds.
 - **Finds the right antenna by itself.** Many laptops have a single antenna on the "wrong" port;
   the first scan checks both and keeps the one that works.
 - **Command-line tool included** for scripts and power users.
 - **Installs with one package.** Nothing touches your EFI partition or NVRAM.
 
-Tested on an HP laptop (`103c:804c`) with macOS 26 Tahoe: WPA2 connection, DHCP, about
-4 ms to the router and around **3.5 Mbps** of real download speed.
+The earlier 1.3.0 build was tested on an HP laptop (`103c:804c`) with macOS 26 Tahoe,
+with WPA2/DHCP and approximately **3.5 Mbps** download throughput. These results do
+not validate 1.4.0. See [Feature Status](docs/FEATURES.md) for implemented code, tests
+and remaining work. Full Wi-Fi 4 compliance and Bluetooth interoperability are pending.
+
+**1.4.0 is an experimental development snapshot.** Wi-Fi association and traffic
+have passed limited hardware checks. After a Bluetooth approval restart, the test
+host experienced loud uncontrollable internal-speaker noise. Emergency audio-driver
+unload/reset attempts and another reboot stopped the noise, but internal audio is
+currently unavailable. The cause is unresolved; Bluetooth upload is unverified.
+See the [audio incident record](docs/AUDIO_INCIDENT.md) and
+[continuation prompt](docs/NEXT_SESSION.md). This snapshot is not a stable release.
 
 > **RTL8723BE Wi-Fi** is made by [**Issen Software Group**](https://issen.kurokamicorp.com/). The
 > hardware setup is a port of the Linux kernel's `rtl8723be` driver, and the card runs Realtek's
@@ -63,7 +75,10 @@ Tested on an HP laptop (`103c:804c`) with macOS 26 Tahoe: WPA2 connection, DHCP,
 5. The first time, macOS asks you to allow the driver: go to
    **System Settings › Privacy & Security**, click **Allow**, restart, and click
    **Load Driver…** again after logging in.
-6. Click **Scan**, pick your network and enter its password.
+6. Click **Scan**, pick your network and enter its password. Leave **Remember this network
+   in Keychain** selected to reuse it and auto-join after the driver loads.
+
+For the separate USB Bluetooth function, follow [Bluetooth Guide](docs/BLUETOOTH.md).
 
 After each restart, open the app and click **Load Driver…** again.
 
@@ -129,15 +144,20 @@ rtl8723be_cli disconnect
 ## Common questions
 
 **Why doesn't my network show up in the macOS Wi-Fi menu?**
-The Wi-Fi menu only works with Apple's own wireless driver framework, which third-party drivers
-can't use on current macOS. RTL8723BE Wi-Fi shows up as a wired network port (`en…`) instead.
-Use the app or its menu bar icon to pick networks.
+This driver uses IOEthernetController and shows up as a wired network port (`en…`).
+Native AirPort adapters exist for other devices, but an RTL8723BE adapter has not been
+implemented here. See the source-based [native integration assessment](docs/FEATURES.md#native-airport-assessment).
 
 **Does Bluetooth work?**
-No. This project only covers the Wi-Fi side of the card.
+The installer now includes a separate RTL8723B USB firmware loader. macOS handles
+pairing/power once the native controller attaches. Hardware validation and current
+BlueToolFixup/Lilu dependencies are required; see [Bluetooth Guide](docs/BLUETOOTH.md).
 
 **Why is it slower than on Windows or Linux?**
-The driver currently talks to your router with 802.11g speeds. 802.11n support is planned.
+This development build negotiates HT20 and firmware rate control, and offers experimental
+hardware transmit encryption. TX A-MPDU, Block Ack reordering and HT40 are still pending.
+Limited 1.4.0 interface-bound traffic results are recorded in
+[Validation](docs/VALIDATION.md); peak throughput and CPU savings remain unmeasured.
 
 **Is it safe?**
 The driver refuses to start unless you add the boot flag yourself, it is only loaded after you
@@ -160,7 +180,7 @@ Any with an RTL8723BE card (PCI ID `10ec:b723`). Check in **System Information �
 
 The kext brings the card up the same way Linux does (power sequence, Realtek firmware, radio
 tables and calibration), scans, joins networks, runs the WPA2 handshake and encrypts traffic
-in software. It hands macOS ordinary Ethernet frames, so DHCP, DNS and routing work as usual.
+in software by default (optional hardware TX CCMP). It hands macOS ordinary Ethernet frames, so DHCP, DNS and routing work as usual.
 The app and the command-line tool talk to the kext directly.
 
 ---
@@ -170,8 +190,8 @@ The app and the command-line tool talk to the kext directly.
 You need macOS 14 or later and **Xcode 26**.
 
 ```bash
-make all                          # kext + command-line tool
-make test-hardware test-crypto    # descriptor, eFuse, table and CCMP tests
+make all                          # Wi-Fi kext + Bluetooth kext + command-line tool
+make test                         # production protocol/crypto/firmware tests + legacy simulation
 ./scripts/build_dmg.sh            # app, installer package and dist/RTL8723BE_WiFi_Installer.dmg
 ./gui/Scripts/make-icon.sh        # re-render the app icon from gui/Resources/Icon/AppIcon.svg
 ```
@@ -212,4 +232,6 @@ Copyright © 2026 Issen Software Group. Licensed as openly as its origins allow
 - **Realtek firmware licence** ([LICENSES/LicenseRef-rtlwifi-firmware.txt](LICENSES/LicenseRef-rtlwifi-firmware.txt))
   for the embedded `rtl8723befw_36.bin`, redistributed unmodified.
 
-See [NOTICE.md](NOTICE.md) for third-party notices.
+The Bluetooth loader is GPL-2.0-or-later. BSD/ISC notices for net80211 adaptations
+and the Bluetooth firmware licence are also distributed. See [NOTICE.md](NOTICE.md)
+and [upstream provenance](docs/UPSTREAM.md) for details.

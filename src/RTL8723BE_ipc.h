@@ -24,7 +24,27 @@ enum RTL8723BEMethodIndex {
     kMethodWriteRF        = 9,  // in: rf offset, value     (administrator only)
     kMethodGetDiag        = 10, // out: RTL8723BEDiag
     kMethodIQCalibrate    = 11, // out: bit0 path A (S1), bit1 path B (S0) calibrated (administrator only)
-    kNumberOfMethods      = 12
+    kMethodGetLinkInfo    = 12, // appended; existing IPC sizes stay unchanged
+    kMethodSetOptions     = 13, // scalar: RTL8723BEOption mask; disconnected only
+    kNumberOfMethods      = 14
+};
+
+enum RTL8723BEOption {
+    kRTLOptionHT = 1U << 0,
+    kRTLOptionTxCrypto = 1U << 1,
+    kRTLOptionBluetoothCoexist = 1U << 2 // Linux 1-antenna internal-switch PTA baseline
+};
+struct RTL8723BELinkInfo {
+    uint32_t version;
+    uint32_t options;
+    uint32_t rate_mask;
+    uint8_t ht20;
+    uint8_t short_gi;
+    uint8_t wmm;
+    uint8_t firmware_rate_control;
+    uint8_t tx_crypto;
+    uint8_t max_rate; // hardware encoding: 0..11 legacy, 12..19 MCS0..7
+    uint8_t reserved[2];
 };
 
 struct RTL8723BEDiag {

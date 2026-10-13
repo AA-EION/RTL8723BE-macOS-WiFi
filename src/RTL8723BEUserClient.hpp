@@ -40,6 +40,9 @@ public:
     static IOReturn sGetDiag(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sIQCalibrate(OSObject *target, void *reference, IOExternalMethodArguments *args);
 
+    static IOReturn sGetLinkInfo(OSObject *, void *, IOExternalMethodArguments *);
+    static IOReturn sSetOptions(OSObject *, void *, IOExternalMethodArguments *);
+
 private:
     RTL8723BE *fOwner;
     task_t     fTask;

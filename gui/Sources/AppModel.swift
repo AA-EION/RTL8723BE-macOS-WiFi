@@ -3,6 +3,7 @@
 
 import AppKit
 import Darwin
+import IOBluetooth
 import Observation
 
 /// What the radio is doing, from the user's point of view.
@@ -95,17 +96,34 @@ final class AppModel {
     var isScanning = false
     var lastScan: Date?
     var joiningNetwork: WiFiNetwork?
+    var savedNetworks = UserDefaults.standard.stringArray(forKey: "savedNetworks") ?? []
+    var autoJoin = UserDefaults.standard.object(forKey: "autoJoin") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoJoin, forKey: "autoJoin") }
+    }
+    private let credentials = NetworkCredentials()
+    private var manuallyDisconnected = false
+    private var nextAutoJoin = Date.distantPast
+    private var autoJoinTask: Task<Void, Never>?
+
     var isBusy = false
     var alertMessage: String?
 
     // Diagnostics
     var diag: RTL8723BEDiag?
+    var linkInfo: RTL8723BELinkInfo?
+    var bluetoothPresent = false
+    var bluetoothFirmwareLoaded = false
+    var bluetoothControllerAvailable = false
+    var bluetoothPowered = false
+    private var environmentRefreshCount = 0
+
 
     // Log
     var logs: [LogEntry] = []
     var logLevelFilter: LogLevel = .info
     var filteredLogs: [LogEntry] { logs.filter { $0.level >= logLevelFilter } }
 
+    private var loadingWiFiDriver = false
     private var timer: Timer?
     private var lastCounters: (rx: UInt64, tx: UInt64, at: Date)?
     private var lastState: UInt32 = .max
@@ -136,6 +154,7 @@ final class AppModel {
     // MARK: - Polling
 
     func refreshEnvironment() {
+        refreshBluetooth()
         hardwarePresent = rtl_hardware_present() == 1
         var size = 0
         sysctlbyname("kern.bootargs", nil, &size, nil, 0)
@@ -146,6 +165,9 @@ final class AppModel {
     }
 
     func refresh() {
+        environmentRefreshCount += 1
+        if environmentRefreshCount % 5 == 0 { refreshBluetooth() }
+        if loadingWiFiDriver || (isBusy && !driverLoaded) { return }
         var conn: io_connect_t = 0
         guard rtl_open_client(&conn) == 0 else {
             if driverLoaded { log("Driver is no longer loaded.", .warning) }
@@ -154,6 +176,12 @@ final class AppModel {
             interfaceName = ""
             ipAddress = ""
             connectedSince = nil
+            driverVersion = nil
+            diag = nil
+            linkInfo = nil
+            throughput = Throughput()
+            lastCounters = nil
+            lastState = .max
             return
         }
         defer { rtl_close_client(conn) }
@@ -161,6 +189,9 @@ final class AppModel {
             driverLoaded = true
             log("Connected to RTL8723BEWiFi.kext.")
             Task { await loadDriverVersion() }
+            if let savedOptions = UserDefaults.standard.object(forKey: "driverOptions") as? UInt32 {
+                _ = rtl_set_options(conn, savedOptions)
+            }
         }
 
         var st = RTL8723BEStatus()
@@ -192,7 +223,24 @@ final class AppModel {
         var diagnostics = RTL8723BEDiag()
         if rtl_get_diag(conn, &diagnostics) == 0 { diag = diagnostics }
 
+        var features = RTL8723BELinkInfo()
+        if rtl_get_link_info(conn, &features) == 0 { linkInfo = features }
         updateInterface()
+        if autoJoin, !manuallyDisconnected, phase == .disconnected, !isBusy, !isScanning,
+           !savedNetworks.isEmpty, autoJoinTask == nil, Date() >= nextAutoJoin {
+            nextAutoJoin = Date().addingTimeInterval(30)
+            autoJoinTask = Task { [weak self] in
+                guard let self else { return }
+                defer { self.autoJoinTask = nil }
+                await self.scan()
+                guard !Task.isCancelled, self.autoJoin, !self.manuallyDisconnected, self.phase == .disconnected, !self.isBusy else { return }
+                for candidate in self.networks where candidate.secured && self.savedNetworks.contains(candidate.ssid) {
+                    guard let password = self.savedPassword(for: candidate) else { continue }
+                    await self.join(candidate, password: password)
+                    break
+                }
+            }
+        }
     }
 
     private func updateInterface() {
@@ -247,7 +295,7 @@ final class AppModel {
     // MARK: - Actions
 
     func scan() async {
-        guard driverLoaded, !isScanning else { return }
+        guard driverLoaded, !isScanning, !isBusy else { return }
         isScanning = true
         phase = .scanning
         log("Scanning 2.4 GHz channels 1–13…")
@@ -271,7 +319,28 @@ final class AppModel {
         refresh()
     }
 
-    func join(_ network: WiFiNetwork, password: String) async {
+    func savedPassword(for network: WiFiNetwork) -> String? {
+        do { return try credentials.password(for: network.ssid) }
+        catch { alertMessage = "Could not read the saved password: \(error.localizedDescription)"; return nil }
+    }
+
+    func forgetNetwork(_ ssid: String) {
+        autoJoinTask?.cancel()
+        do {
+            try credentials.forget(ssid)
+            savedNetworks.removeAll { $0 == ssid }
+            UserDefaults.standard.set(savedNetworks, forKey: "savedNetworks")
+            log("Forgot \(ssid).")
+        } catch { alertMessage = "Could not forget the network: \(error.localizedDescription)" }
+    }
+
+    func join(_ network: WiFiNetwork, password: String, remember: Bool = true) async {
+        guard !isBusy, !isScanning else { return }
+        guard NetworkCredentials.validPassword(password), !network.ssid.isEmpty, network.ssid.utf8.count <= 32 else {
+            alertMessage = "Use an 8–63 character ASCII password or a 64 digit hexadecimal WPA2 key."
+            return
+        }
+        manuallyDisconnected = false
         isBusy = true
         defer { isBusy = false }
         log("Joining \(network.displayName) (\(network.bssid), channel \(network.channel))…")
@@ -296,16 +365,27 @@ final class AppModel {
         }.value
         guard rc == 0 else {
             alertMessage = rc == Int32(bitPattern: 0xE00002C2)
-                ? "The password must be 8–63 characters."
+                ? "Use an 8–63 character ASCII password or a 64 digit hexadecimal WPA2 key."
                 : "The driver refused the request (IOReturn 0x\(String(UInt32(bitPattern: rc), radix: 16)))."
             log("Join failed: \(alertMessage ?? "")", .error)
             return
         }
         // The 802.11 exchange and WPA2 handshake complete asynchronously in the driver.
-        for _ in 0..<30 {
+        for _ in 0..<60 {
+            if Task.isCancelled || manuallyDisconnected { return }
             try? await Task.sleep(for: .milliseconds(500))
             refresh()
-            if phase == .connected { return }
+            if phase == .connected && bssid == network.bssid {
+                if remember {
+                    do {
+                        try credentials.save(password, for: network.ssid)
+                        savedNetworks.removeAll { $0 == network.ssid }
+                        savedNetworks.insert(network.ssid, at: 0)
+                        UserDefaults.standard.set(savedNetworks, forKey: "savedNetworks")
+                    } catch { alertMessage = "Connected, but the password could not be saved: \(error.localizedDescription)" }
+                } else { forgetNetwork(network.ssid) }
+                return
+            }
             if phase == .disconnected { break }
         }
         if phase != .connected {
@@ -315,6 +395,8 @@ final class AppModel {
     }
 
     func disconnect() async {
+        manuallyDisconnected = true
+        autoJoinTask?.cancel()
         await Task.detached {
             var conn: io_connect_t = 0
             guard rtl_open_client(&conn) == 0 else { return }
@@ -334,11 +416,62 @@ final class AppModel {
         }
     }
 
-    /// Asks for an administrator password and loads the driver (installed copy first).
-    func loadDriver() async {
-        guard let resources = Bundle.main.resourcePath else { return }
+    func setDriverOption(_ option: UInt32, enabled: Bool) {
+        guard let info = linkInfo else { return }
+        let options = enabled ? info.options | option : info.options & ~option
+        var conn: io_connect_t = 0
+        guard rtl_open_client(&conn) == 0 else { return }
+        defer { rtl_close_client(conn) }
+        if rtl_set_options(conn, options) == 0 {
+            UserDefaults.standard.set(options, forKey: "driverOptions")
+            refresh()
+        } else { alertMessage = "Disconnect before changing radio options." }
+    }
+
+    private func refreshBluetooth() {
+        let usb = rtl_bluetooth_present()
+        bluetoothPresent = usb & 1 != 0
+        bluetoothFirmwareLoaded = usb & 2 != 0
+        let controller = IOBluetoothHostController.default()
+        let address = controller?.addressAsString() ?? ""
+        bluetoothControllerAvailable = !address.isEmpty && address != "00-00-00-00-00-00" && address != "00:00:00:00:00:00"
+        bluetoothPowered = bluetoothControllerAvailable && controller?.powerState == kBluetoothHCIPowerStateON
+    }
+
+    func openBluetoothSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
+    }
+
+    func loadBluetoothDriver() async {
+        guard let resources = Bundle.main.resourcePath, !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        let helper = (resources as NSString).appendingPathComponent("load_bluetooth_kext.sh")
+        let kext = (resources as NSString).appendingPathComponent("RTL8723BluetoothFirmware.kext")
+        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }
+        let command = "/bin/bash \(q(helper)) \(q(kext))"
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let source = "do shell script \"\(escaped)\" with administrator privileges"
+        log("Loading Bluetooth firmware driver…")
+        let failure: String? = await Task.detached {
+            var error: NSDictionary?
+            _ = NSAppleScript(source: source)?.executeAndReturnError(&error)
+            return error?[NSAppleScript.errorMessage] as? String
+        }.value
+        if let failure { alertMessage = failure; log("Bluetooth load failed: \(failure)", .error) }
+        try? await Task.sleep(for: .seconds(2))
+        refreshBluetooth()
+        if bluetoothFirmwareLoaded { log("Bluetooth firmware loaded; pairing and power are managed by macOS.") }
+        else if failure == nil { log("Bluetooth load request returned; firmware upload has not been confirmed.", .warning) }
+    }
+
+    /// Asks for an administrator password and loads the driver (installed copy first).
+    func loadDriver() async {
+        guard !isBusy, !isScanning, let resources = Bundle.main.resourcePath else { return }
+        isBusy = true
+        defer { isBusy = false }
+        loadingWiFiDriver = true
+        defer { loadingWiFiDriver = false; refresh() }
         let helper = (resources as NSString).appendingPathComponent("load_test_kext.sh")
         let kext = (resources as NSString).appendingPathComponent("RTL8723BEWiFi.kext")
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }

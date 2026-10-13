@@ -18,8 +18,19 @@ struct NetworksCard: View {
                     ForEach(model.networks) { network in
                         NetworkRow(network: network,
                                    isCurrent: model.phase == .connected && network.bssid == model.bssid,
-                                   join: { joinTarget = network },
+                                   join: {
+                                       if let password = model.savedPassword(for: network) {
+                                           Task { await model.join(network, password: password) }
+                                       } else { joinTarget = network }
+                                   },
                                    disconnect: { Task { await model.disconnect() } })
+                        .contextMenu {
+                            Button("Join with another password…") { joinTarget = network }
+                                .disabled(!network.secured || model.isBusy)
+                            if model.savedNetworks.contains(network.ssid) {
+                                Button("Forget this network") { model.forgetNetwork(network.ssid) }
+                            }
+                        }
                         if network.id != model.networks.last?.id {
                             Divider().padding(.leading, 40)
                         }
@@ -28,8 +39,8 @@ struct NetworksCard: View {
             }
         }
         .sheet(item: $joinTarget) { network in
-            JoinSheet(network: network) { password in
-                Task { await model.join(network, password: password) }
+            JoinSheet(network: network) { password, remember in
+                Task { await model.join(network, password: password, remember: remember) }
             }
         }
     }
@@ -129,9 +140,10 @@ private struct NetworkRow: View {
 
 private struct JoinSheet: View {
     let network: WiFiNetwork
-    let join: (String) -> Void
+    let join: (String, Bool) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var password = ""
+    @State private var remember = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: Design.Spacing.medium) {
@@ -150,6 +162,7 @@ private struct JoinSheet: View {
             SecureField("Password", text: $password)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(submit)
+            Toggle("Remember this network in Keychain", isOn: $remember)
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
@@ -157,7 +170,7 @@ private struct JoinSheet: View {
                 Button("Join", action: submit)
                     .primaryActionButtonStyle()
                     .keyboardShortcut(.defaultAction)
-                    .disabled(password.count < 8 || password.count > 63)
+                    .disabled(!NetworkCredentials.validPassword(password))
             }
         }
         .padding(Design.Spacing.large)
@@ -165,8 +178,8 @@ private struct JoinSheet: View {
     }
 
     private func submit() {
-        guard (8...63).contains(password.count) else { return }
-        join(password)
+        guard NetworkCredentials.validPassword(password) else { return }
+        join(password, remember)
         dismiss()
     }
 }

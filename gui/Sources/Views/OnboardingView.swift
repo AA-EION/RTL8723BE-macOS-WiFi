@@ -65,6 +65,8 @@ struct OnboardingView: View {
                     .controlSize(.large)
                 }
 
+                BluetoothCard(model: model).frame(maxWidth: 560)
+
                 if let reason = blockedReason {
                     Label(reason, systemImage: "info.circle")
                         .font(.callout)

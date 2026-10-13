@@ -32,3 +32,28 @@ by XiaoMiku01.
     Copyright (c) 2026 Issen Software Group (TetherKitNext)
     Copyright (c) 2026 TetherKit contributors
     SPDX-License-Identifier: MIT
+
+## OpenBSD net80211 (BSD-3-Clause / ISC)
+
+The portable WPA2 state machine and receive validation follow OpenBSD's
+`ieee80211_pae_input.c`, `ieee80211_pae_output.c`, and `ieee80211_input.c`.
+A-MSDU destination validation, LLC decapsulation and ADDBA refusal are adaptations
+of its net80211 code. Complete author notices and terms are retained in the
+source and [LICENSES/LicenseRef-OpenBSD-net80211.txt](LICENSES/LicenseRef-OpenBSD-net80211.txt).
+Source revisions and hashes are recorded in [docs/upstream-sources.json](docs/upstream-sources.json).
+
+## Linux Bluetooth (GPL-2.0-or-later)
+
+`bluetooth/` ports the RTL8723B epatch selection and download protocol from
+Linux v6.12 `drivers/bluetooth/btrtl.c` and USB transport conventions from
+`btusb.c`. The btrtl.c copyright notice is (C) 2015 Endless Mobile, Inc. The synchronous
+IOUSBHost implementation is original. The native-controller handoff was checked
+against thegwchr/RealtekBluetoothFirmware at commit
+`22e501a8a0a7aba8bb4e594bc6f40b1a67391af9`; its implementation is not vendored.
+
+`bluetooth/firmware/rtl8723b_fw.bin` is redistributed unmodified from linux-firmware
+under [Realtek's firmware terms](LICENSES/LicenseRef-rtl-bt-firmware.txt).
+The pinned SHA-256 is `c9c8a9f6ebd90b7449a7e4d38ee39952dc7cc47d6c1d054e42cfbb5e4d818853`.
+The build verifies this hash before embedding the original bytes.
+
+BlueToolFixup and Lilu are external dependencies, not bundled or modified here.

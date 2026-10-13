@@ -21,22 +21,20 @@ if [[ ! -d "${KEXT_SOURCE}" ]]; then
     echo "Kext not found: ${KEXT_SOURCE}" >&2
     exit 2
 fi
-LOADED="$(/usr/bin/kmutil showloaded 2>&1)"
-if [[ "${LOADED}" == *com.rtl8723be.macos.wifi* ]]; then
-    echo "Closing UserClient apps and unloading previous com.rtl8723be.macos.wifi kext..."
-    /usr/bin/killall RTL8723BEWirelessUtility rtl8723be_cli 2>/dev/null || true
-    sleep 1
-    /sbin/kextunload -b com.rtl8723be.macos.wifi || {
-        echo "Could not hot-unload active kext; please reboot once, then load v1.3.0." >&2
-        exit 2
-    }
-fi
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${KEXT_SOURCE}/Contents/Info.plist")"
-if [[ "${VERSION}" != '1.3.0' ]]; then
-    echo "Expected Linux-parity init build 1.3.0, got ${VERSION}. Refusing older build." >&2
+if [[ "${VERSION}" != '1.4.0' ]]; then
+    echo "Expected feature test build 1.4.0, got ${VERSION}. Refusing older build." >&2
     exit 2
 fi
 /usr/bin/codesign --verify --strict "${KEXT_SOURCE}"
+LOADED="$(/usr/bin/kmutil showloaded 2>&1)"
+if [[ "${LOADED}" == *com.rtl8723be.macos.wifi* ]]; then
+    echo "Unloading previous com.rtl8723be.macos.wifi kext..."
+    /sbin/kextunload -b com.rtl8723be.macos.wifi || {
+        echo "Could not hot-unload active kext; please reboot once, then load v1.4.0." >&2
+        exit 2
+    }
+fi
 # Always load a temporary copy: /private/tmp is cleared at every restart, so the driver
 # can never start during boot (boot-time start right after the FileVault password freezes
 # the machine). Remove any boot-time copy left behind by the withdrawn first 1.3.0 package.
