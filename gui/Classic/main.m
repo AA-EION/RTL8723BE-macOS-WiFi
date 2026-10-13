@@ -609,7 +609,7 @@ static NSImage *statusImage(RTLPhase phase) {
     _primary = makeButton(@"Scan", self, @selector(primaryAction:), NSMakeRect(20, H - 200, 110, 30));
     _primary.keyEquivalent = @"\r";
     _primary.autoresizingMask = NSViewMinYMargin;
-    _load = makeButton(@"Load Driver…", self, @selector(loadDriver:), NSMakeRect(140, H - 200, 130, 30));
+    _load = makeButton(@"Load Driver…", self, @selector(loadDriver:), NSMakeRect(20, H - 200, 130, 30));
     _load.autoresizingMask = NSViewMinYMargin;
     _join = makeButton(@"Join…", self, @selector(joinSelected:), NSMakeRect(280, H - 200, 90, 30));
     _join.autoresizingMask = NSViewMinYMargin;
