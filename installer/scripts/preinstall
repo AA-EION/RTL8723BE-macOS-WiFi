@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Issen Software Group
 # Stop the running driver (if any) so the new version can be loaded.
-/usr/bin/killall RTL8723BEWirelessUtility rtl8723be_cli 2>/dev/null || true
+# macOS 11+ uses kmutil; 10.13-10.15 only have kextstat/kextunload.
+/usr/bin/killall RTL8723BEWirelessUtility RTL8723BEWirelessUtilityModern rtl8723be_cli 2>/dev/null || true
 if /usr/bin/kmutil showloaded 2>/dev/null | /usr/bin/grep -q com.rtl8723be.macos.wifi; then
     /usr/bin/kmutil unload -b com.rtl8723be.macos.wifi 2>/dev/null || \
+        echo "RTL8723BE: previous driver still in use; the new one takes over after a restart."
+elif /usr/sbin/kextstat -l 2>/dev/null | /usr/bin/grep -q com.rtl8723be.macos.wifi; then
+    /sbin/kextunload -b com.rtl8723be.macos.wifi 2>/dev/null || \
         echo "RTL8723BE: previous driver still in use; the new one takes over after a restart."
 fi
 exit 0

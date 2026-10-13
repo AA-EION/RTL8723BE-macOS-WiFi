@@ -22,13 +22,12 @@ mkdir -p "${APP_BUNDLE}/Contents/Resources"
 # 3. Reuse the checked-in icon; packaging must not depend on a live graphics session.
 cp "${PROJECT_DIR}/gui/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 
-# 4. Compile Swift GUI binary
-echo "[*] Compiling Swift/AppKit GUI binary..."
-swiftc -O -parse-as-library -swift-version 5 -target x86_64-apple-macosx14.0 \
-    -import-objc-header "${PROJECT_DIR}/gui/RTL8723BEBridge.h" \
-    -framework AppKit -framework SwiftUI -framework IOKit -framework ServiceManagement \
-    "${PROJECT_DIR}"/gui/Sources/*.swift "${PROJECT_DIR}"/gui/Sources/Views/*.swift \
-    -o "${APP_BUNDLE}/Contents/MacOS/RTL8723BEWirelessUtility"
+# 4. Compile both interfaces. The AppKit one is the main executable and works on macOS 10.13+; on
+#    macOS 14+ it launches the SwiftUI one, which lives in the same bundle.
+echo "[*] Compiling the classic (macOS 10.13+) and modern (macOS 14+) interfaces..."
+make -C "${PROJECT_DIR}" ui-classic ui-modern
+cp "${PROJECT_DIR}/build/RTL8723BEWirelessUtility" "${APP_BUNDLE}/Contents/MacOS/RTL8723BEWirelessUtility"
+cp "${PROJECT_DIR}/build/RTL8723BEWirelessUtilityModern" "${APP_BUNDLE}/Contents/MacOS/RTL8723BEWirelessUtilityModern"
 
 # 5. Populate Bundle Resources (Info.plist, RTL8723BEWiFi.kext, rtl8723be_cli, stage_opencore.sh)
 cp "${PROJECT_DIR}/gui/Info.plist" "${APP_BUNDLE}/Contents/Info.plist"

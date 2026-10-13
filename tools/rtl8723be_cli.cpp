@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <mach/mach.h>
 #include <IOKit/IOKitLib.h>
 #include "../src/RTL8723BE_ipc.h"
 
@@ -27,7 +28,7 @@ static io_connect_t openDriverConnection(void) {
         return IO_OBJECT_NULL;
     }
 
-    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, matchDict);
+    io_service_t service = IOServiceGetMatchingService(MACH_PORT_NULL /* == kIOMasterPortDefault/kIOMainPortDefault; valid on every macOS */, matchDict);
     if (service == IO_OBJECT_NULL) {
         fprintf(stderr, "[!] RTL8723BE kernel service not currently loaded in IORegistry (pci10ec,b723).\n");
         fprintf(stderr, "    See docs/TESTING.md for manual post-login loading; EFI injection should stay disabled.\n");

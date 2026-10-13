@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Issen Software Group
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # GitHub has no hosted High Sierra runner, so the oldest supported system is verified by
+  # compiling and linking against Apple's own macOS 10.13 SDK (kernel headers included) with a
+  # 10.13 deployment target: any API or kernel symbol newer than High Sierra fails the build.
+  SDK13_URL: https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.13.sdk.tar.xz
+
+jobs:
+  unit-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-hardware test-crypto test-boot-config
+
+  build:
+    name: build (${{ matrix.sdk }} SDK, target 10.13)
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [macOS-10.13, host]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the macOS 10.13 SDK
+        if: matrix.sdk == 'macOS-10.13'
+        run: |
+          curl -fsSL "$SDK13_URL" -o sdk.tar.xz
+          mkdir -p "$RUNNER_TEMP/sdk" && tar -xf sdk.tar.xz -C "$RUNNER_TEMP/sdk"
+          SDK="$(find "$RUNNER_TEMP/sdk" -maxdepth 2 -name 'MacOSX10.13.sdk' | head -1)"
+          test -d "$SDK/System/Library/Frameworks/Kernel.framework/Headers"
+          echo "SDK_PATH=$SDK" >> "$GITHUB_ENV"
+          echo "Using $SDK"
+
+      - name: Toolchain
+        run: xcodebuild -version; xcrun --sdk macosx --show-sdk-version; uname -m
+
+      - name: Kext, CLI and classic interface (deployment target 10.13)
+        run: |
+          make kext cli ui-classic MIN_OS=10.13 ${SDK_PATH:+SDK_PATH="$SDK_PATH"}
+
+      - name: Modern (SwiftUI) interface
+        if: matrix.sdk == 'host'
+        run: make ui-modern
+
+      - name: Verify compatibility
+        run: |
+          scripts/verify_compat.sh kext build/RTL8723BEWiFi.kext
+          scripts/verify_compat.sh tool tools/rtl8723be_cli
+          scripts/verify_compat.sh tool build/RTL8723BEWirelessUtility
+          if [ -f build/RTL8723BEWirelessUtilityModern ]; then scripts/verify_compat.sh modern build/RTL8723BEWirelessUtilityModern; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.sdk }}
+          path: |
+            build/RTL8723BEWiFi.kext
+            build/RTL8723BEWirelessUtility*
+            tools/rtl8723be_cli
+
+  package:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app, installer package and DMG
+        run: ./scripts/build_dmg.sh
+      - name: Verify the bundle
+        run: scripts/verify_compat.sh app "build/RTL8723BE Wireless Utility.app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RTL8723BE_WiFi_Installer
+          path: dist/RTL8723BE_WiFi_Installer.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-bundle
+          path: build/RTL8723BE Wireless Utility.app
+
+  launch:
+    name: launch on ${{ matrix.os }}
+    needs: package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: "RTL8723BE Wireless Utility.app"
+      - name: Launch both interfaces (no driver present, so the app must show the setup screen)
+        run: |
+          APP="$PWD/RTL8723BE Wireless Utility.app"
+          chmod +x "$APP"/Contents/MacOS/*
+          echo "Darwin $(uname -r)"
+          for mode in default classic; do
+            if [ "$mode" = classic ]; then export RTL_FORCE_CLASSIC=1; else unset RTL_FORCE_CLASSIC; fi
+            "$APP/Contents/MacOS/RTL8723BEWirelessUtility" > "launch-$mode.log" 2>&1 &
+            PID=$!
+            sleep 8
+            kill -0 $PID || { cat "launch-$mode.log"; echo "app exited early ($mode)"; exit 1; }
+            echo "[$mode] pid $PID running image: $(ps -p $PID -o comm=)"
+            screencapture -x "shot-$mode.png" || true
+            kill $PID; wait $PID 2>/dev/null || true
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launch-${{ matrix.os }}
+          path: |
+            shot-*.png
+            launch-*.log

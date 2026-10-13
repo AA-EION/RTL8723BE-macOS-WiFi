@@ -5,13 +5,19 @@
 #define _RTL8723BE_BRIDGE_H_
 
 #include <stdint.h>
+#include <mach/mach.h>
 #include <IOKit/IOKitLib.h>
 #include "../src/RTL8723BE_ipc.h"
+
+/* kIOMasterPortDefault (<= macOS 11) was renamed kIOMainPortDefault (macOS 12+), and the new name
+ * does not exist on older systems. Both are MACH_PORT_NULL, which IOKit accepts everywhere, so use
+ * that and the same code runs from macOS 10.13 up. */
+#define RTL_IO_PORT MACH_PORT_NULL
 
 static inline int rtl_open_client(io_connect_t *outConn) {
     CFMutableDictionaryRef matchDict = IOServiceMatching("RTL8723BE");
     if (!matchDict) return -1;
-    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, matchDict);
+    io_service_t service = IOServiceGetMatchingService(RTL_IO_PORT, matchDict);
     if (service == IO_OBJECT_NULL) return -2;
     io_connect_t conn = IO_OBJECT_NULL;
     kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
@@ -68,7 +74,7 @@ static inline int rtl_get_diag(io_connect_t conn, struct RTL8723BEDiag *outDiag)
 
 /* Copies the BSD name (e.g. "en2") of the driver's network interface. */
 static inline int rtl_copy_bsd_name(char *out, size_t outLen) {
-    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("RTL8723BE"));
+    io_service_t service = IOServiceGetMatchingService(RTL_IO_PORT, IOServiceMatching("RTL8723BE"));
     if (service == IO_OBJECT_NULL) return -1;
     CFTypeRef name = IORegistryEntrySearchCFProperty(service, kIOServicePlane, CFSTR("BSD Name"),
                                                      kCFAllocatorDefault, kIORegistryIterateRecursively);
@@ -86,7 +92,7 @@ static inline int rtl_hardware_present(void) {
     CFMutableDictionaryRef match = IOServiceMatching("IOPCIDevice");
     if (!match) return 0;
     CFDictionarySetValue(match, CFSTR("IOPCIMatch"), CFSTR("0xb72310ec"));
-    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, match);
+    io_service_t service = IOServiceGetMatchingService(RTL_IO_PORT, match);
     if (service == IO_OBJECT_NULL) return 0;
     IOObjectRelease(service);
     return 1;

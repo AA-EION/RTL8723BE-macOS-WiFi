@@ -8,6 +8,10 @@ if [[ $# -ne 1 ]]; then
     exit 2
 fi
 KEXT_SOURCE="$1"
+# Darwin 17 = macOS 10.13 High Sierra ... 19 = 10.15 Catalina, 20 = 11 Big Sur, 25 = 26 Tahoe.
+# kmutil replaced kextload/kextunload/kextstat in macOS 11; older systems only have the old tools.
+DARWIN_MAJOR="$(/usr/sbin/sysctl -n kern.osrelease | /usr/bin/cut -d. -f1)"
+if (( DARWIN_MAJOR >= 20 )); then USE_KMUTIL=1; else USE_KMUTIL=0; fi
 BOOT_ARGS="$(/usr/sbin/sysctl -n kern.bootargs)"
 case " ${BOOT_ARGS} " in
     *" rtl8723be_experimental=1 "*) ;;
@@ -21,10 +25,14 @@ if [[ ! -d "${KEXT_SOURCE}" ]]; then
     echo "Kext not found: ${KEXT_SOURCE}" >&2
     exit 2
 fi
-LOADED="$(/usr/bin/kmutil showloaded 2>&1)"
+if (( USE_KMUTIL )); then
+    LOADED="$(/usr/bin/kmutil showloaded 2>&1)"
+else
+    LOADED="$(/usr/sbin/kextstat -l 2>&1)"
+fi
 if [[ "${LOADED}" == *com.rtl8723be.macos.wifi* ]]; then
     echo "Closing UserClient apps and unloading previous com.rtl8723be.macos.wifi kext..."
-    /usr/bin/killall RTL8723BEWirelessUtility rtl8723be_cli 2>/dev/null || true
+    /usr/bin/killall RTL8723BEWirelessUtility RTL8723BEWirelessUtilityModern rtl8723be_cli 2>/dev/null || true
     sleep 1
     /sbin/kextunload -b com.rtl8723be.macos.wifi || {
         echo "Could not hot-unload active kext; please reboot once, then load v1.3.0." >&2
@@ -50,5 +58,18 @@ TEST_DIR="$(/usr/bin/mktemp -d /private/tmp/rtl8723be-test.XXXXXX)"
 /bin/chmod -R go-w "${TEST_DIR}/RTL8723BEWiFi.kext"
 echo "Manual test build: ${TEST_DIR}/RTL8723BEWiFi.kext"
 echo "No EFI changes. If loading is denied, keep the error and follow Testing Guide; do not enable automatic injection."
-/usr/bin/kmutil load -p "${TEST_DIR}/RTL8723BEWiFi.kext"
+if (( USE_KMUTIL )); then
+    /usr/bin/kmutil load -p "${TEST_DIR}/RTL8723BEWiFi.kext"
+else
+    # macOS 10.13-10.15: kextload asks for user approval in Security & Privacy the first time
+    # (unless SIP's unapproved-kext restriction is off, as on most Hackintoshes).
+    if ! OUT="$(/sbin/kextload -v "${TEST_DIR}/RTL8723BEWiFi.kext" 2>&1)"; then
+        echo "${OUT}" >&2
+        if [[ "${OUT}" == *approv* || "${OUT}" == *"Security"* ]]; then
+            echo "The driver is not approved yet. Open System Preferences > Security & Privacy, click Allow, then load it again." >&2
+        fi
+        exit 2
+    fi
+    echo "${OUT}"
+fi
 echo "Load request returned. Check driver status and kernel logs; this alone does not prove hardware startup succeeded."

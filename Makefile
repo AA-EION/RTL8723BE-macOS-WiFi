@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Issen Software Group
 
-SDK_PATH := $(shell xcrun --sdk macosx --show-sdk-path)
+# One kext, one CLI and one app for every macOS from 10.13 High Sierra up. Override on the command
+# line, e.g. `make kext SDK_PATH=/path/MacOSX10.13.sdk` to build against the High Sierra SDK itself.
+MIN_OS   ?= 10.13
+SDK_PATH ?= $(shell xcrun --sdk macosx --show-sdk-path)
 CXX := clang++
 CC := clang
 
-KEXT_CXXFLAGS := -arch x86_64 -mmacosx-version-min=26.5 -mkernel -fno-builtin -fno-common \
+KEXT_CXXFLAGS := -arch x86_64 -mmacosx-version-min=$(MIN_OS) -mkernel -fno-builtin -fno-common \
                  -fno-exceptions -fno-rtti -nostdinc -std=c++14 -O2 \
                  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
                  -Wno-deprecated-declarations \
@@ -13,13 +16,13 @@ KEXT_CXXFLAGS := -arch x86_64 -mmacosx-version-min=26.5 -mkernel -fno-builtin -f
                  -I"$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers" \
                  -Isrc -MMD -MP
 
-KEXT_CFLAGS   := -arch x86_64 -mmacosx-version-min=26.5 -mkernel -fno-builtin -fno-common \
+KEXT_CFLAGS   := -arch x86_64 -mmacosx-version-min=$(MIN_OS) -mkernel -fno-builtin -fno-common \
                  -nostdinc -O2 \
                  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
                  -isysroot "$(SDK_PATH)" \
                  -I"$(SDK_PATH)/System/Library/Frameworks/Kernel.framework/Headers"
 
-KEXT_LDFLAGS  := -arch x86_64 -mmacosx-version-min=26.5 -Wl,-kext -nostdlib \
+KEXT_LDFLAGS  := -arch x86_64 -mmacosx-version-min=$(MIN_OS) -Wl,-kext -nostdlib \
                  -lkmodc++ -lkmod -lcc_kext -isysroot "$(SDK_PATH)"
 
 KEXT_BUNDLE   := build/RTL8723BEWiFi.kext
@@ -37,7 +40,7 @@ KEXT_OBJS     := build/RTL8723BE.o \
 -include $(KEXT_OBJS:.o=.d)
 
 .DEFAULT_GOAL := all
-.PHONY: all kext cli test test-hardware diagnose clean
+.PHONY: all kext cli ui-classic ui-modern test test-hardware diagnose clean
 
 all: kext cli
 
@@ -56,8 +59,28 @@ kext: $(KEXT_OBJS) src/Info.plist
 	codesign --force --deep --sign - $(KEXT_BUNDLE)
 
 cli: tools/rtl8723be_cli.cpp src/RTL8723BE_ipc.h
-	$(CXX) -arch x86_64 -std=c++17 -O2 -framework IOKit -framework CoreFoundation \
+	$(CXX) -arch x86_64 -mmacosx-version-min=$(MIN_OS) -isysroot "$(SDK_PATH)" -std=c++14 -O2 -framework IOKit -framework CoreFoundation \
 		tools/rtl8723be_cli.cpp -o $(CLI_BIN)
+
+# App: one bundle, two interfaces. The classic AppKit executable is the bundle's main executable
+# (macOS $(MIN_OS)+, no Swift runtime) and hands over to the SwiftUI one on macOS 14+.
+# The SwiftUI part is always built against the host's own SDK, whatever SDK_PATH is.
+CLASSIC_BIN := build/RTL8723BEWirelessUtility
+MODERN_BIN  := build/RTL8723BEWirelessUtilityModern
+MODERN_SDK  := $(shell xcrun --sdk macosx --show-sdk-path)
+MODERN_MIN  := 14.0
+
+ui-classic: gui/Classic/main.m gui/RTL8723BEBridge.h src/RTL8723BE_ipc.h
+	@mkdir -p build
+	$(CC) -fobjc-arc -O2 -Wall -Wno-deprecated-declarations -arch x86_64 -mmacosx-version-min=$(MIN_OS) \
+		-isysroot "$(SDK_PATH)" -framework Cocoa -framework IOKit gui/Classic/main.m -o $(CLASSIC_BIN)
+
+ui-modern: $(wildcard gui/Sources/*.swift gui/Sources/Views/*.swift) gui/RTL8723BEBridge.h
+	@mkdir -p build
+	swiftc -O -parse-as-library -swift-version 5 -target x86_64-apple-macosx$(MODERN_MIN) -sdk "$(MODERN_SDK)" \
+		-import-objc-header gui/RTL8723BEBridge.h \
+		-framework AppKit -framework SwiftUI -framework IOKit -framework ServiceManagement \
+		gui/Sources/*.swift gui/Sources/Views/*.swift -o $(MODERN_BIN)
 
 test: test-hardware test-crypto test-boot-config
 	$(MAKE) -C tests test
@@ -66,7 +89,7 @@ diagnose: kext
 	kmutil print-diagnostics --bundle-path $(KEXT_BUNDLE)
 
 clean:
-	rm -rf build/*.o $(KEXT_BUNDLE) $(CLI_BIN)
+	rm -rf build/*.o $(KEXT_BUNDLE) $(CLI_BIN) $(CLASSIC_BIN) $(MODERN_BIN)
 
 # Production descriptor ABI checks, independent of the legacy simulated driver.
 test-hardware:
