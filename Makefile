@@ -44,11 +44,19 @@ KEXT_OBJS     := build/RTL8723BE.o \
 
 all: kext cli
 
-build/%.o: src/%.cpp
+# Objects are rebuilt whenever MIN_OS or SDK_PATH change (stale ones are checked in / left from other targets).
+CONFIG_STAMP := build/.build-config
+.PHONY: FORCE
+FORCE:
+$(CONFIG_STAMP): FORCE
+	@mkdir -p build
+	@echo "$(MIN_OS) $(SDK_PATH)" | cmp -s - $@ || echo "$(MIN_OS) $(SDK_PATH)" > $@
+
+build/%.o: src/%.cpp $(CONFIG_STAMP)
 	@mkdir -p build
 	$(CXX) $(KEXT_CXXFLAGS) -c $< -o $@
 
-build/RTL8723BE_kmod.o: src/RTL8723BE_kmod.c
+build/RTL8723BE_kmod.o: src/RTL8723BE_kmod.c $(CONFIG_STAMP)
 	@mkdir -p build
 	$(CC) $(KEXT_CFLAGS) -c $< -o $@
 
@@ -58,7 +66,7 @@ kext: $(KEXT_OBJS) src/Info.plist
 	cp src/Info.plist $(KEXT_BUNDLE)/Contents/Info.plist
 	codesign --force --deep --sign - $(KEXT_BUNDLE)
 
-cli: tools/rtl8723be_cli.cpp src/RTL8723BE_ipc.h
+cli: tools/rtl8723be_cli.cpp src/RTL8723BE_ipc.h $(CONFIG_STAMP)
 	$(CXX) -arch x86_64 -mmacosx-version-min=$(MIN_OS) -isysroot "$(SDK_PATH)" -std=c++14 -O2 -framework IOKit -framework CoreFoundation \
 		tools/rtl8723be_cli.cpp -o $(CLI_BIN)
 
@@ -70,7 +78,7 @@ MODERN_BIN  := build/RTL8723BEWirelessUtilityModern
 MODERN_SDK  := $(shell xcrun --sdk macosx --show-sdk-path)
 MODERN_MIN  := 14.0
 
-ui-classic: gui/Classic/main.m gui/RTL8723BEBridge.h src/RTL8723BE_ipc.h
+ui-classic: gui/Classic/main.m gui/RTL8723BEBridge.h src/RTL8723BE_ipc.h $(CONFIG_STAMP)
 	@mkdir -p build
 	$(CC) -fobjc-arc -O2 -Wall -Wno-deprecated-declarations -arch x86_64 -mmacosx-version-min=$(MIN_OS) \
 		-isysroot "$(SDK_PATH)" -framework Cocoa -framework IOKit gui/Classic/main.m -o $(CLASSIC_BIN)

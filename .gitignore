@@ -11,3 +11,4 @@ build/dmg_staging/
 .DS_Store
 build/.DS_Store
 build/pkg/
+build/.build-config

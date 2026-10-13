@@ -41,6 +41,21 @@ so your Mac gets online without a USB dongle or a card swap.
 Tested on an HP laptop (`103c:804c`) with macOS 26 Tahoe: WPA2 connection, DHCP, about
 4 ms to the router and around **3.5 Mbps** of real download speed.
 
+### Supported macOS versions
+
+One driver and one app cover **macOS 10.13 High Sierra through macOS 26 Tahoe**; they adapt to
+whichever system they run on.
+
+| macOS | App interface | Driver loading |
+|---|---|---|
+| 14 Sonoma and later | SwiftUI interface and menu bar panel | `kmutil` |
+| 11 Big Sur – 13 Ventura | Classic AppKit interface with a menu bar icon | `kmutil` |
+| 10.13 High Sierra – 10.15 Catalina | Classic AppKit interface with a menu bar icon | `kextload` (approve once in System Preferences › Security & Privacy) |
+
+CI builds and links everything against Apple's own **macOS 10.13 SDK** with a 10.13 deployment
+target, and starts both interfaces on current macOS. There is no hosted High Sierra machine, so
+releases older than macOS 26 have not been run on real hardware: please report what you find.
+
 > **RTL8723BE Wi-Fi** is made by [**Issen Software Group**](https://issen.kurokamicorp.com/). The
 > hardware setup is a port of the Linux kernel's `rtl8723be` driver, and the card runs Realtek's
 > own firmware from [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git)
@@ -167,10 +182,15 @@ The app and the command-line tool talk to the kext directly.
 
 ## For developers
 
-You need macOS 14 or later and **Xcode 26**.
+You need a Mac with Xcode (any version that can target macOS 10.13, so Xcode 10 – 16; Xcode 26 also
+works). The kext, CLI and classic interface are built for macOS 10.13+; the SwiftUI interface needs
+macOS 14+ and is only used there. Build against the High Sierra SDK itself to check you did not use
+anything newer: `make kext cli ui-classic SDK_PATH=/path/to/MacOSX10.13.sdk`.
 
 ```bash
 make all                          # kext + command-line tool
+make ui-classic ui-modern         # AppKit interface (macOS 10.13+) and SwiftUI interface (macOS 14+)
+scripts/verify_compat.sh app "build/RTL8723BE Wireless Utility.app"   # deployment-target checks
 make test-hardware test-crypto    # descriptor, eFuse, table and CCMP tests
 ./scripts/build_dmg.sh            # app, installer package and dist/RTL8723BE_WiFi_Installer.dmg
 ./gui/Scripts/make-icon.sh        # re-render the app icon from gui/Resources/Icon/AppIcon.svg

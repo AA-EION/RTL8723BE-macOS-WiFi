@@ -91,16 +91,16 @@ static NSString *formatDuration(NSTimeInterval t) {
 }
 
 @interface RTLController : NSObject
-@property BOOL hardwarePresent, bootArgPresent, driverLoaded, isScanning, isBusy;
-@property (copy) NSString *driverVersion, *macAddress, *ssid, *bssid, *interfaceName, *ipAddress, *lastAlert;
-@property RTLPhase phase;
-@property int channel, rssi, antenna;
-@property (strong) NSDate *connectedSince, *lastScan;
-@property double rxBps, txBps;
-@property (strong) NSArray<RTLNetwork *> *networks;
-@property BOOL haveDiag;
-@property struct RTL8723BEDiag diag;
-@property (strong) NSMutableArray<NSString *> *logLines;
+@property (nonatomic) BOOL hardwarePresent, bootArgPresent, driverLoaded, isScanning, isBusy;
+@property (nonatomic, copy) NSString *driverVersion, *macAddress, *ssid, *bssid, *interfaceName, *ipAddress, *lastAlert;
+@property (nonatomic) RTLPhase phase;
+@property (nonatomic) int channel, rssi, antenna;
+@property (nonatomic, strong) NSDate *connectedSince, *lastScan;
+@property (nonatomic) double rxBps, txBps;
+@property (nonatomic, strong) NSArray<RTLNetwork *> *networks;
+@property (nonatomic) BOOL haveDiag;
+@property (nonatomic) struct RTL8723BEDiag diag;
+@property (nonatomic, strong) NSMutableArray<NSString *> *logLines;
 - (void)log:(NSString *)message;
 - (void)refresh;
 - (void)scan;
@@ -466,7 +466,7 @@ static NSImage *statusImage(RTLPhase phase) {
             NSBezierPath *arc = [NSBezierPath bezierPath];
             [arc appendBezierPathWithArcWithCenter:c radius:3.2 * i + 1 startAngle:45 endAngle:135];
             arc.lineWidth = 1.7;
-            arc.lineCapStyle = NSLineCapStyleRound;
+            arc.lineCapStyle = NSRoundLineCapStyle;
             if (phase == RTLPhaseDisconnected && i == 3) { CGFloat dash[2] = {2, 2}; [arc setLineDash:dash count:2 phase:0]; }
             [arc stroke];
         }
