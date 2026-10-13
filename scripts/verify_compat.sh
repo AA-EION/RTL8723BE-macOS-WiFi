@@ -17,7 +17,11 @@ ok()   { echo "ok:   $*"; }
 
 # Prints the minimum macOS version of a Mach-O (LC_BUILD_VERSION minos or LC_VERSION_MIN_MACOSX version).
 minos() {
-    xcrun vtool -show-build "$1" 2>/dev/null | awk '/minos/ {print $2; exit} /LC_VERSION_MIN_MACOSX/ {f=1} f && /version/ {print $2; exit}'
+    otool -l "$1" 2>/dev/null | awk '
+        /cmd LC_BUILD_VERSION/      { mode = "build" }
+        /cmd LC_VERSION_MIN_MACOSX/ { mode = "min" }
+        mode == "build" && $1 == "minos"   { print $2; exit }
+        mode == "min"   && $1 == "version" { print $2; exit }'
 }
 
 # a <= b for dotted versions
@@ -31,7 +35,7 @@ check_arch() {
 
 check_minos() {
     local m; m="$(minos "$1")"
-    [[ -n "$m" ]] || fail "$1: cannot read deployment target"
+    [[ -n "$m" ]] || { otool -l "$1" | grep -A6 -E 'LC_BUILD_VERSION|LC_VERSION_MIN' >&2 || true; fail "$1: cannot read deployment target"; }
     ver_le "$m" "$2" || fail "$1: deployment target $m is newer than $2"
     ok "$1 deployment target $m (<= $2)"
 }
