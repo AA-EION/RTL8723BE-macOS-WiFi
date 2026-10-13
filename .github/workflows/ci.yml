@@ -88,6 +88,8 @@ jobs:
     name: launch on ${{ matrix.os }}
     needs: package
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -119,3 +121,14 @@ jobs:
           path: |
             shot-*.png
             launch-*.log
+      - name: Publish screenshots to the ci-screenshots branch
+        if: always() && github.event_name == 'push'
+        run: |
+          D="$RUNNER_TEMP/shots"; rm -rf "$D"; mkdir -p "$D"; cd "$D"
+          git init -q; git config user.name ci; git config user.email ci@example.invalid
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git fetch -q origin ci-screenshots 2>/dev/null && git checkout -q ci-screenshots || git checkout -q -b ci-screenshots
+          mkdir -p "${{ matrix.os }}"
+          cp "$GITHUB_WORKSPACE"/shot-*.png "$GITHUB_WORKSPACE"/launch-*.log "${{ matrix.os }}/" || true
+          git add -A; git commit -qm "screenshots ${{ matrix.os }} ${{ github.sha }}" || true
+          git push -q origin ci-screenshots
