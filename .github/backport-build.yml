@@ -1,0 +1,103 @@
+# Monterey backport experiment for RTL8723BE-macOS-WiFi (your fork).
+# Put this file in your fork at .github/workflows/backport-build.yml (replace the old one).
+# Builds kext + CLI + the app at a macOS 12 target. It only edits files inside the CI checkout.
+# The app step is allowed to fail: its log tells us exactly what needs rewriting for Monterey.
+name: backport-monterey
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  MIN_OS: "12.0"          # Monterey
+  MIN_MAJOR: "12"
+
+jobs:
+  build:
+    runs-on: macos-15-intel   # Intel runner; everything is x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-path
+          ls -d /Applications/Xcode* || true
+
+      - name: Show layout, build scripts and boot-arg usage
+        run: |
+          echo "--- top level ---"; ls
+          echo "--- gui ---"; find gui -maxdepth 3 | head -80
+          echo "--- scripts ---"; ls scripts
+          echo "--- every place a minimum OS is set ---"
+          grep -rnE "version-min|MACOSX_DEPLOYMENT_TARGET|\.macOS\(|platforms:|LSMinimumSystemVersion|apple-macos|apple-macosx" Makefile scripts gui src installer 2>/dev/null | grep -v "^Binary" | head -80 || true
+          echo "--- src/Info.plist ---"; cat src/Info.plist
+          echo "--- boot-arg references ---"; grep -rn "rtl8723be_" src | head -20 || true
+          echo "--- Makefile ---"; cat Makefile
+          echo "--- scripts/build_dmg.sh ---"; cat scripts/build_dmg.sh || true
+          echo "--- gui/Package.swift ---"; cat gui/Package.swift || true
+
+      - name: Lower deployment target (CI checkout only)
+        run: |
+          FILES=$(grep -rlE "version-min|MACOSX_DEPLOYMENT_TARGET|\.macOS\(|platforms:|LSMinimumSystemVersion|apple-macos" Makefile scripts gui src installer 2>/dev/null || true)
+          echo "$FILES"
+          for f in $FILES; do
+            sed -i '' -E \
+              -e "s/-mmacosx-version-min=[0-9.]+/-mmacosx-version-min=${MIN_OS}/g" \
+              -e "s/(MACOSX_DEPLOYMENT_TARGET[ =:]+\"?)[0-9.]+/\1${MIN_OS}/g" \
+              -e "s/\.macOS\(\.v[0-9_]+\)/.macOS(.v${MIN_MAJOR})/g" \
+              -e "s/\.macOS\(\"[0-9.]+\"\)/.macOS(\"${MIN_OS}\")/g" \
+              -e "s/(apple-macosx?)[0-9.]+/\1${MIN_OS}/g" \
+              "$f" || true
+          done
+          echo "--- after ---"
+          grep -rnE "version-min|MACOSX_DEPLOYMENT_TARGET|\.macOS\(|apple-macos" Makefile scripts gui 2>/dev/null | head -40 || true
+
+      - name: Build kext and CLI
+        run: make all
+
+      - name: Inspect kext
+        run: |
+          K=$(ls -d build/*.kext | head -1)
+          echo "kext: $K"
+          plutil -lint "$K/Contents/Info.plist"
+          EXE=$(ls "$K/Contents/MacOS" | head -1)
+          otool -l "$K/Contents/MacOS/$EXE" | grep -A4 LC_BUILD_VERSION || true
+          nm -u "$K/Contents/MacOS/$EXE" | c++filt || true
+          echo "--- CLI ---"
+          find . -name "rtl8723be_cli" -type f | head
+
+      - name: Build app (allowed to fail, log is the point)
+        continue-on-error: true
+        run: |
+          chmod +x scripts/*.sh gui/Scripts/*.sh 2>/dev/null || true
+          ./scripts/build_dmg.sh 2>&1 | tee app-build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize app build problems
+        if: always()
+        run: |
+          echo "--- errors ---"
+          grep -E "error:" app-build.log | sort | uniq -c | sort -rn | head -60 || true
+          echo "--- availability problems (APIs newer than macOS 12) ---"
+          grep -E "is only available in macOS|requires macOS|not available in macOS" app-build.log | sort | uniq -c | head -60 || true
+          echo "--- anything app-like that was produced ---"
+          find . -name "*.app" -maxdepth 6 | head; find dist build -maxdepth 2 2>/dev/null | head -40
+
+      - name: Collect outputs
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R build/*.kext out/ 2>/dev/null || true
+          CLI=$(find . -name "rtl8723be_cli" -type f | head -1); [ -n "$CLI" ] && cp "$CLI" out/ || true
+          find . -name "*.app" -maxdepth 6 -exec cp -R {} out/ \; 2>/dev/null || true
+          cp app-build.log out/ 2>/dev/null || true
+          ls -la out
+          zip -r -X monterey-test.zip out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: monterey-test
+          path: monterey-test.zip

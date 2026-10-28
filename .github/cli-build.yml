@@ -1,0 +1,54 @@
+# Builds the RTL8723BE kext AND the command-line tool (rtl8723be_cli) for Monterey.
+# Save in your fork as .github/workflows/cli-build.yml
+# IMPORTANT: delete the old backport-build.yml so only this one runs.
+# The artifact you want is called "rtl8723be-cli-test".
+name: cli-build
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  MIN_OS: "12.0"
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lower deployment target (CI checkout only)
+        run: |
+          sed -i '' -E "s/-mmacosx-version-min=[0-9.]+/-mmacosx-version-min=${MIN_OS}/g" Makefile
+          grep -n "mmacosx-version-min" Makefile
+
+      - name: Build kext and CLI
+        run: make all
+
+      - name: Find outputs
+        run: |
+          echo "--- build dir ---"
+          find build -maxdepth 3 | head -60
+          echo "--- every executable named like the CLI ---"
+          find . -type f -name "rtl8723be*" ! -name "*.c" ! -name "*.h" ! -name "*.cpp" ! -name "*.o" | head -20
+          echo "--- CLI arch ---"
+          CLI=$(find . -type f -name "rtl8723be_cli" | head -1)
+          echo "CLI path: $CLI"
+          file "$CLI" || true
+          otool -l "$CLI" | grep -A4 LC_BUILD_VERSION || true
+
+      - name: Collect outputs
+        run: |
+          mkdir -p out
+          cp -R build/*.kext out/
+          CLI=$(find . -type f -name "rtl8723be_cli" | head -1)
+          if [ -z "$CLI" ]; then echo "CLI NOT FOUND"; exit 1; fi
+          cp "$CLI" out/rtl8723be_cli
+          chmod +x out/rtl8723be_cli
+          ls -laR out | head -40
+          zip -r -X rtl8723be-cli-test.zip out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rtl8723be-cli-test
+          path: rtl8723be-cli-test.zip

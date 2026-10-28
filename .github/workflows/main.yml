@@ -1,0 +1,65 @@
+# Monterey backport experiment for RTL8723BE-macOS-WiFi (your fork).
+# Put this file in your fork at .github/workflows/backport-build.yml.
+# It lowers the deployment target to macOS 12 and prints what else (if anything)
+# blocks Monterey. It only changes the Makefile inside the CI checkout.
+name: backport-monterey
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  MIN_OS: "12.0"          # Monterey
+
+jobs:
+  build:
+    runs-on: macos-15-intel   # Intel runner; the kext is x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+          ls -d /Applications/Xcode* || true
+
+      - name: Show upstream deployment target, plist, and boot-arg usage
+        run: |
+          grep -n "mmacosx-version-min" Makefile || true
+          echo "--- src/Info.plist ---"
+          cat src/Info.plist
+          echo "--- boot-arg references in src ---"
+          grep -rn "rtl8723be_" src | head -20 || true
+
+      - name: Lower deployment target (CI checkout only)
+        run: |
+          sed -i '' -E "s/-mmacosx-version-min=[0-9.]+/-mmacosx-version-min=${MIN_OS}/g" Makefile
+          grep -n "mmacosx-version-min" Makefile
+
+      - name: Build kext and CLI
+        run: make all
+
+      - name: Inspect result
+        run: |
+          K=$(ls -d build/*.kext | head -1)
+          echo "kext: $K"
+          plutil -lint "$K/Contents/Info.plist"
+          EXE=$(ls "$K/Contents/MacOS" | head -1)
+          echo "--- minimum OS (LC_BUILD_VERSION) ---"
+          otool -l "$K/Contents/MacOS/$EXE" | grep -A4 LC_BUILD_VERSION || true
+          echo "--- OSBundleLibraries ---"
+          plutil -extract OSBundleLibraries xml1 -o - "$K/Contents/Info.plist" || true
+          echo "--- undefined symbols ---"
+          nm -u "$K/Contents/MacOS/$EXE" | c++filt || true
+          echo "--- kmod_info ---"
+          nm "$K/Contents/MacOS/$EXE" | grep -i kmod_info || echo "MISSING kmod_info"
+
+      - name: Zip kext for Windows
+        run: |
+          K=$(ls -d build/*.kext | head -1)
+          ditto -c -k --keepParent "$K" build/kext-monterey-test.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kext-monterey-test
+          path: build/kext-monterey-test.zip
